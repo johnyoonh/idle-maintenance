@@ -1,0 +1,65 @@
+{
+  "suggestions": [
+    {
+      "script": "brew-cleanup",
+      "description": "Clean up Homebrew cache and old versions",
+      "command": "brew cleanup -s && brew autoremove",
+      "frequency_hours": 168
+    },
+    {
+      "script": "docker-prune",
+      "description": "Remove unused Docker images and containers",
+      "command": "docker system prune -af --volumes",
+      "frequency_hours": 168
+    },
+    {
+      "script": "npm-cache-clean",
+      "description": "Clean npm cache and outdated global packages",
+      "command": "npm cache verify && npm outdated -g",
+      "frequency_hours": 336
+    },
+    {
+      "script": "chezmoi-update",
+      "description": "Update dotfiles from Bitwarden and apply changes",
+      "command": "chezmoi update && chezmoi apply",
+      "frequency_hours": 24
+    },
+    {
+      "script": "bw-sync",
+      "description": "Sync Bitwarden vault with server",
+      "command": "bw sync",
+      "frequency_hours": 24
+    },
+    {
+      "script": "downloads-cleanup",
+      "description": "Review and clean old files in Downloads folder",
+      "command": "find ~/Downloads -mtime +30 -type f -exec ls -lh {} \\;",
+      "frequency_hours": 168
+    },
+    {
+      "script": "desktop-cleanup",
+      "description": "Review and organize Desktop files",
+      "command": "ls -lht ~/Desktop | head -20",
+      "frequency_hours": 168
+    },
+    {
+      "script": "git-cleanup",
+      "description": "Clean up merged git branches in repos",
+      "command": "find ~/code -name .git -type d -execdir git branch --merged \\;",
+      "frequency_hours": 168
+    },
+    {
+      "script": "trash-empty",
+      "description": "Empty Trash (files older than 30 days)",
+      "command": "find ~/.Trash -mtime +30 -delete",
+      "frequency_hours": 168
+    },
+    {
+      "script": "disk-usage",
+      "description": "Check disk usage and large directories",
+      "command": "du -sh ~/* | sort -hr | head -10",
+      "frequency_hours": 336
+    }
+  ],
+  "last_shown": {}
+}

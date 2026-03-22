@@ -1,0 +1,9 @@
+.DS_Store
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.log
+.idea/
+.vscode/
+IdleMaintenance.app/
