@@ -3,7 +3,17 @@ import subprocess
 import os
 from datetime import datetime
 
-DAYS_LIMIT = 90
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def load_config():
+    path = os.path.join(BASE_DIR, "config.json")
+    if os.path.exists(path):
+        import json
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except: pass
+    return {"stale_days_limit": 90, "keep_days_limit": 60, "max_prompts": 10, "close_on_unfocus": True}
 
 # Apps we never want to flag
 WHITELIST = [
@@ -12,6 +22,20 @@ WHITELIST = [
     "Pages.app", "Keynote.app", "iMovie.app", "GarageBand.app",
     "App Store.app", "System Settings.app", "TickTick.app", "iTerm.app"
 ]
+
+def load_custom_whitelist():
+    path = os.path.join(BASE_DIR, "custom_whitelist.json")
+    if os.path.exists(path):
+        import json
+        import time
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return {app: time.time() for app in data}
+                return data
+        except: pass
+    return {}
 
 def get_active_extensions():
     try:
@@ -31,6 +55,12 @@ def get_stale_apps():
     except:
         apps_raw = []
     
+    config = load_config()
+    STALE_LIMIT = config.get("stale_days_limit", 90)
+    KEEP_LIMIT = config.get("keep_days_limit", 60)
+    
+    custom_whitelist = load_custom_whitelist()
+    import time
     stale = []
     for app in apps_raw:
         app_name = os.path.basename(app)
@@ -40,19 +70,33 @@ def get_stale_apps():
         if "localized" in app: continue 
         if "Xcode.app" in app: continue
         
+        last_used_days = STALE_LIMIT + 1
+        date_str = "(null)"
         try:
             res = subprocess.check_output(["mdls", "-name", "kMDItemLastUsedDate", app], text=True).strip()
             date_str = res.split("= ")[1].strip().replace('"', '')
-            if date_str == "(null)":
-                stale.append(app)
-                continue
-            
-            last_used = datetime.strptime(date_str[:10], "%Y-%m-%d")
-            if (datetime.now() - last_used).days > DAYS_LIMIT:
-                stale.append(app)
+            if date_str != "(null)":
+                last_used = datetime.strptime(date_str[:10], "%Y-%m-%d")
+                last_used_days = (datetime.now() - last_used).days
         except:
-            continue
+            pass
+
+        if app in custom_whitelist:
+            keep_time = custom_whitelist[app]
+            time_since_keep = (time.time() - keep_time) / 86400.0
             
+            if time_since_keep > KEEP_LIMIT and last_used_days > KEEP_LIMIT:
+                # App kept over KEEP_LIMIT days ago and still unused
+                pass
+            else:
+                continue
+                
+        if last_used_days > STALE_LIMIT:
+            if date_str == "(null)":
+                stale.append(f"{app}|Unknown")
+            else:
+                stale.append(f"{app}|{date_str[:10]}")
+                
     return stale
 
 if __name__ == "__main__":

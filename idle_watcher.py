@@ -3,6 +3,18 @@ import subprocess
 import time
 import os
 import sys
+import json
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def load_config():
+    path = os.path.join(BASE_DIR, "config.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except: pass
+    return {}
 
 # CONFIG
 IDLE_THRESHOLD_MINUTES = 10
@@ -15,11 +27,13 @@ def get_idle_time_seconds():
 
 def trigger_maintenance():
     # Run the interactive maintenance script directly without confirmation
-    interactive_script = os.path.expanduser("~/Library/Scripts/idle-maintenance/maintenance_interactive.py")
+    interactive_script = os.path.join(BASE_DIR, "maintenance_interactive.py")
     subprocess.run(["/usr/bin/python3", interactive_script])
     
-    # Always jump to TickTick at the end
-    subprocess.run(["open", "-a", "TickTick"])
+    config = load_config()
+    target_app = config.get("on_finish_app", "TickTick")
+    if target_app:
+        subprocess.run(["open", "-a", target_app])
 
 def main():
     # Immediate trigger for testing/launch

@@ -1,7 +1,7 @@
 #!/usr/bin/env swift
 import AppKit
 
-class MaintenanceApp: NSObject, NSApplicationDelegate {
+class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let window = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 450, height: 280),
         styleMask: [.titled, .closable],
@@ -10,6 +10,7 @@ class MaintenanceApp: NSObject, NSApplicationDelegate {
     
     var appName: String = ""
     var appPath: String = ""
+    var canCloseOnUnfocus: Bool = false
     
     init(name: String, path: String) {
         self.appName = name
@@ -18,8 +19,27 @@ class MaintenanceApp: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMenu()
         setupWindow()
         NSApp.activate(ignoringOtherApps: true)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.canCloseOnUnfocus = true
+        }
+    }
+    
+    func setupMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        
+        let appMenu = NSMenu(title: "Idle Maintenance")
+        appMenu.addItem(withTitle: "About Idle Maintenance v1.1", action: nil, keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit Idle Maintenance", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        
+        NSApp.mainMenu = mainMenu
     }
     
     func setupWindow() {
@@ -27,6 +47,7 @@ class MaintenanceApp: NSObject, NSApplicationDelegate {
         window.center()
         window.isReleasedWhenClosed = false
         window.level = .floating
+        window.delegate = self
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = contentView
@@ -57,6 +78,18 @@ class MaintenanceApp: NSObject, NSApplicationDelegate {
         pathLabel.frame = NSRect(x: 20, y: 120, width: 410, height: 15)
         pathLabel.alignment = .center
         contentView.addSubview(pathLabel)
+        
+        var lastUsedText = ""
+        if CommandLine.arguments.count > 4 {
+             lastUsedText = "Date info: " + CommandLine.arguments[4]
+        }
+        
+        let dateLabel = NSTextField(labelWithString: lastUsedText)
+        dateLabel.font = NSFont.systemFont(ofSize: 10)
+        dateLabel.textColor = .selectedControlColor
+        dateLabel.frame = NSRect(x: 20, y: 105, width: 410, height: 15)
+        dateLabel.alignment = .center
+        contentView.addSubview(dateLabel)
         
         let helpLabel = NSTextField(labelWithString: "Press a number to act immediately:")
         helpLabel.font = NSFont.systemFont(ofSize: 12)
@@ -94,6 +127,7 @@ class MaintenanceApp: NSObject, NSApplicationDelegate {
             case "2": self.finish("DELETE")
             case "3": self.finish("TRY")
             case "4": self.finish("SKIP")
+            case "\u{1B}": self.finish("QUIT")
             default: break
             }
             return event
@@ -116,10 +150,20 @@ class MaintenanceApp: NSObject, NSApplicationDelegate {
         print("QUIT")
         return true
     }
+    
+    func windowDidResignKey(_ notification: Notification) {
+        if canCloseOnUnfocus && CommandLine.arguments.count > 3 && CommandLine.arguments[3] == "true" {
+            finish("QUIT")
+        }
+    }
 }
 
 let args = CommandLine.arguments
 if args.count < 3 { exit(0) }
+
+ProcessInfo.processInfo.processName = "Idle Maintenance"
+UserDefaults.standard.set("Idle Maintenance", forKey: "CFBundleName")
+UserDefaults.standard.set("Idle Maintenance", forKey: "CFBundleExecutable")
 
 let app = NSApplication.shared
 let delegate = MaintenanceApp(name: args[1], path: args[2])

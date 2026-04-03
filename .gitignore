@@ -1,9 +1,16 @@
-.DS_Store
-*.pyc
+# Python
 __pycache__/
-.venv/
-venv/
+*.py[cod]
+*$py.class
+
+# MacOS
+.DS_Store
+
+# Data & Config (Personal state)
+config.json
+custom_whitelist.json
+stale_queue.json
+
+# Temporary
+/tmp/
 *.log
-.idea/
-.vscode/
-IdleMaintenance.app/
