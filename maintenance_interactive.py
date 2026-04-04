@@ -118,94 +118,99 @@ def delete_app(app_path):
 
 def main():
     if is_running():
+        log("Already running (lock file active). Exiting.")
         return
     create_lock()
 
-    auditor_path = os.path.join(BASE_DIR, "app_auditor.py")
     try:
-        stale_output = subprocess.check_output(["/usr/bin/python3", auditor_path], text=True).splitlines()
-    except:
-        stale_output = []
-        
-    stale_apps = []
-    stale_dates = {}
-    for line in stale_output:
-        if "|" in line:
-            path, date_str = line.split("|", 1)
-            stale_apps.append(path)
-            stale_dates[path] = date_str
-        else:
-            stale_apps.append(line)
-            stale_dates[line] = "Unknown"
-    
-    config = load_config()
-    max_prompts = config.get("max_prompts", 10)
-    close_on_unfocus = config.get("close_on_unfocus", True)
-    
-    queue = load_json(QUEUE_PATH)
-    if isinstance(queue, dict): queue = [] # Just in case it gets mangled
-    whitelist = load_custom_whitelist(WHITELIST_PATH)
-    
-    queue = [item for item in queue if item["path"] in stale_apps]
-    existing_paths = [item["path"] for item in queue]
-    for app in stale_apps:
-        if app not in existing_paths and app not in whitelist:
-            queue.append({"path": app, "last_prompted": 0})
-            
-    queue.sort(key=lambda x: x["last_prompted"])
-    
-    processed = 0
-    current_queue = [item for item in queue]
-    
-    for item in queue:
-        if processed >= max_prompts:
-            break
-            
-        app_done = False
-        while not app_done:
-            last_used_info = stale_dates.get(item["path"], "Unknown")
-            if item.get("last_prompted", 0) > 0:
-                last_used_info += f" (Last prompted/tried: {time.strftime('%Y-%m-%d', time.localtime(item['last_prompted']))})"
-            action = prompt_user(item["path"], close_on_unfocus, last_used_info)
-            
-            if action == "QUIT":
-                save_json(QUEUE_PATH, current_queue)
-                save_json(WHITELIST_PATH, whitelist)
-                if os.path.exists(LOCK_FILE): os.remove(LOCK_FILE)
-                return
+        auditor_path = os.path.join(BASE_DIR, "app_auditor.py")
+        try:
+            stale_output = subprocess.check_output(["/usr/bin/python3", auditor_path], text=True).splitlines()
+        except:
+            stale_output = []
 
-            if action == "KEEP":
-                whitelist[item["path"]] = time.time()
-                current_queue = [i for i in current_queue if i["path"] != item["path"]]
-                processed += 1
-                app_done = True
-            elif action == "DELETE":
-                success = delete_app(item["path"])
-                if success:
+        stale_apps = []
+        stale_dates = {}
+        for line in stale_output:
+            if "|" in line:
+                path, date_str = line.split("|", 1)
+                stale_apps.append(path)
+                stale_dates[path] = date_str
+            else:
+                stale_apps.append(line)
+                stale_dates[line] = "Unknown"
+
+        config = load_config()
+        max_prompts = config.get("max_prompts", 10)
+        close_on_unfocus = config.get("close_on_unfocus", True)
+
+        queue = load_json(QUEUE_PATH)
+        if isinstance(queue, dict): queue = []  # Just in case it gets mangled
+        whitelist = load_custom_whitelist(WHITELIST_PATH)
+
+        queue = [item for item in queue if item["path"] in stale_apps]
+        existing_paths = [item["path"] for item in queue]
+        for app in stale_apps:
+            if app not in existing_paths and app not in whitelist:
+                queue.append({"path": app, "last_prompted": 0})
+
+        queue.sort(key=lambda x: x["last_prompted"])
+
+        processed = 0
+        current_queue = [item for item in queue]
+
+        for item in queue:
+            if processed >= max_prompts:
+                break
+
+            app_done = False
+            while not app_done:
+                last_used_info = stale_dates.get(item["path"], "Unknown")
+                if item.get("last_prompted", 0) > 0:
+                    last_used_info += f" (Last prompted/tried: {time.strftime('%Y-%m-%d', time.localtime(item['last_prompted']))})"
+                action = prompt_user(item["path"], close_on_unfocus, last_used_info)
+
+                if action == "QUIT":
+                    save_json(QUEUE_PATH, current_queue)
+                    save_json(WHITELIST_PATH, whitelist)
+                    return
+
+                if action == "KEEP":
+                    whitelist[item["path"]] = time.time()
                     current_queue = [i for i in current_queue if i["path"] != item["path"]]
-                else:
+                    processed += 1
+                    app_done = True
+                elif action == "DELETE":
+                    success = delete_app(item["path"])
+                    if success:
+                        current_queue = [i for i in current_queue if i["path"] != item["path"]]
+                    else:
+                        for q_item in current_queue:
+                            if q_item["path"] == item["path"]:
+                                q_item["last_prompted"] = int(time.time())
+                    processed += 1
+                    app_done = True
+                elif action == "TRY":
+                    subprocess.run(["open", item["path"]])
                     for q_item in current_queue:
                         if q_item["path"] == item["path"]:
                             q_item["last_prompted"] = int(time.time())
-                processed += 1
-                app_done = True
-            elif action == "TRY":
-                subprocess.run(["open", item["path"]])
-                for q_item in current_queue:
-                    if q_item["path"] == item["path"]:
-                        q_item["last_prompted"] = int(time.time())
-                save_json(QUEUE_PATH, current_queue)
-                time.sleep(1)
-            else: # SKIP
-                for q_item in current_queue:
-                    if q_item["path"] == item["path"]:
-                        q_item["last_prompted"] = int(time.time())
-                processed += 1
-                app_done = True
-        
-    save_json(QUEUE_PATH, current_queue)
-    save_json(WHITELIST_PATH, whitelist)
-    if os.path.exists(LOCK_FILE): os.remove(LOCK_FILE)
+                    save_json(QUEUE_PATH, current_queue)
+                    time.sleep(1)
+                else:  # SKIP
+                    for q_item in current_queue:
+                        if q_item["path"] == item["path"]:
+                            q_item["last_prompted"] = int(time.time())
+                    processed += 1
+                    app_done = True
+
+        save_json(QUEUE_PATH, current_queue)
+        save_json(WHITELIST_PATH, whitelist)
+
+    finally:
+        # Always clean up the lock file, even on crash or early exit
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
 
 if __name__ == "__main__":
     main()
