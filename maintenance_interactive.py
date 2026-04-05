@@ -132,6 +132,9 @@ def main():
         stale_apps = []
         stale_dates = {}
         for line in stale_output:
+            line = line.strip()
+            if not line:
+                continue
             if "|" in line:
                 path, date_str = line.split("|", 1)
                 stale_apps.append(path)

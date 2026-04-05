@@ -160,6 +160,7 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 let args = CommandLine.arguments
 if args.count < 3 { exit(0) }
+if args[1].isEmpty || args[2].isEmpty { exit(0) }
 
 ProcessInfo.processInfo.processName = "Idle Maintenance"
 UserDefaults.standard.set("Idle Maintenance", forKey: "CFBundleName")
