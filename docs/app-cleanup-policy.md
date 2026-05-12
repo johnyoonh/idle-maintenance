@@ -28,6 +28,7 @@ Nested config objects are merged with defaults.
   "app_cleanup": {
     "delete_mode": "trash",
     "allow_unknown_restore_source": false,
+    "review_budget_per_run": 1,
     "deletion_ledger": "~/Library/Application Support/idle-maintenance/app-deletions.jsonl",
     "restore_sources": [
       {
@@ -38,7 +39,16 @@ Nested config objects are merged with defaults.
         "type": "mas_tsv",
         "path": "~/repos/app-store-apps.tsv"
       }
-    ]
+    ],
+    "leftover_review": {
+      "enabled": true,
+      "mode": "conservative",
+      "action": "quarantine",
+      "max_item_size_mb": 25,
+      "max_total_size_mb": 250,
+      "quarantine_dir": "~/Library/Application Support/idle-maintenance/quarantine",
+      "ledger": "~/Library/Application Support/idle-maintenance/config-quarantine.jsonl"
+    }
   },
   "hooks": {
     "before_delete_app": [
@@ -68,6 +78,16 @@ Path to a JSONL ledger. Each deletion writes one line with the app path, bundle 
 `app_cleanup.restore_sources`
 
 Ordered list of providers used to decide whether an app is recoverable.
+
+`app_cleanup.review_budget_per_run`
+
+Maximum number of stale app prompts shown by one app-cleanup run. The default is `1`, so each prompt can include both the app decision and related config cleanup without turning an idle return into a long review session.
+
+`app_cleanup.leftover_review`
+
+Optional review of likely app-related config files. In `conservative` mode, idle-maintenance only considers common config locations such as app support directories, bundle-id preference plists, and matching `.config` / `.local/share` directories. Eligible leftovers are quarantined after the app is moved to Trash.
+
+The leftover quarantine ledger is JSONL. Each entry records the original path, quarantine path, app path, bundle id, size, and whether the item appeared to be Mackup-backed or yadm-tracked. Large app data, caches, logs, symlinks, and package installs are ignored by default.
 
 ## Restore Source Providers
 

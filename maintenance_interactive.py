@@ -5,6 +5,7 @@ import json
 import time
 import sys
 import shlex
+from app_leftovers import discover_leftovers, quarantine_leftovers, summarize_leftovers
 from idle_config import APP_SUPPORT_DIR, DEFAULT_CONFIG, load_config
 from restore_sources import app_metadata, classify_app_restore_source
 
@@ -529,7 +530,7 @@ def run_process_audit(config, prompt_budget=None):
     save_json(PROCESS_WHITELIST_PATH, process_whitelist)
     return True, processed
 
-def delete_app(app_path, config):
+def delete_app(app_path, config, metadata=None, leftovers=None):
     cleanup, hooks = app_cleanup_config(config)
     restore_source = get_restore_source(config, app_path)
     allow_unknown = bool(cleanup.get("allow_unknown_restore_source", False))
@@ -544,7 +545,10 @@ def delete_app(app_path, config):
         log(f"Refusing to delete unrecoverable app {app_path}; no Brewfile or MAS restore source found.")
         return False
 
-    metadata = app_metadata(app_path)
+    if metadata is None:
+        metadata = app_metadata(app_path)
+    if leftovers is None:
+        leftovers = discover_leftovers(app_path, metadata, config)
     hook_payload = {
         "action": "before_delete_app",
         "app_path": app_path,
@@ -586,6 +590,9 @@ def delete_app(app_path, config):
     }
     try:
         shutil.move(app_path, dest_path)
+        quarantined = quarantine_leftovers(app_path, metadata, leftovers, config)
+        if quarantined:
+            ledger_entry["quarantined_leftovers"] = quarantined
         append_jsonl(ledger_path, ledger_entry)
         run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
         return True
@@ -606,6 +613,9 @@ def delete_app(app_path, config):
         if success:
             ledger_entry["action"] = "finder-trash"
             ledger_entry["trash_path"] = ""
+            quarantined = quarantine_leftovers(app_path, metadata, leftovers, config)
+            if quarantined:
+                ledger_entry["quarantined_leftovers"] = quarantined
             append_jsonl(ledger_path, ledger_entry)
             run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
         return success
@@ -653,7 +663,12 @@ def main():
                 stale_apps.append(line)
                 stale_dates[line] = "Unknown"
 
-        max_prompts = min(int(config.get("max_prompts", DEFAULT_MAX_PROMPTS)), remaining_prompts)
+        cleanup, _ = app_cleanup_config(config)
+        app_review_budget = int(cleanup.get("review_budget_per_run", 1))
+        max_prompts = min(
+            int(config.get("max_prompts", DEFAULT_MAX_PROMPTS)),
+            max(0, app_review_budget),
+        )
         close_on_unfocus = config.get("close_on_unfocus", True)
 
         queue = load_json(QUEUE_PATH)
@@ -678,11 +693,16 @@ def main():
             app_done = False
             while not app_done and processed < max_prompts:
                 last_used_info = stale_dates.get(item["path"], "Unknown")
+                metadata = app_metadata(item["path"])
+                leftovers = discover_leftovers(item["path"], metadata, config)
                 restore_source = get_restore_source(config, item["path"])
                 if restore_source.get("source") == "unknown":
                     last_used_info += " • Restore: unknown; delete disabled"
                 else:
                     last_used_info += f" • Restore: {restore_source.get('restore_command', restore_source.get('source'))}"
+                leftover_summary = summarize_leftovers(leftovers)
+                if leftover_summary:
+                    last_used_info += f" • {leftover_summary}"
                 if item.get("last_prompted", 0) > 0:
                     last_used_info += f" (Last prompted/tried: {time.strftime('%Y-%m-%d', time.localtime(item['last_prompted']))})"
                 action = prompt_user(item["path"], close_on_unfocus, last_used_info)
@@ -698,7 +718,7 @@ def main():
                     processed += 1
                     app_done = True
                 elif action == "DELETE":
-                    success = delete_app(item["path"], config)
+                    success = delete_app(item["path"], config, metadata, leftovers)
                     if success:
                         current_queue = [i for i in current_queue if i["path"] != item["path"]]
                     else:
