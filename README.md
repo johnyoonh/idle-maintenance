@@ -1,199 +1,231 @@
-# Idle Maintenance System
+# Idle Maintenance
 
-Shows one maintenance suggestion when you open a terminal tab.
+Low-friction maintenance for this Mac, split into two lightweight paths:
 
-## Display Format
+- **Terminal suggestions**: one command suggestion when a new shell tab opens.
+- **Scheduled runner**: low-load maintenance tasks launched by `com.john.idle-maintenance` through Wiki Automation every 15 minutes.
 
-```
-Clean Homebrew cache • brew cleanup | 1=Run 2=Del 3=Try 4=Skip
-```
+The scheduled runner is the authoritative background maintenance path. The old resident `IdleMaintenance.app` / `idle_watcher.py` GUI watcher is legacy/manual and is not expected to stay running.
 
-Clean, single line with golden command name.
+## Terminal Suggestions
 
-## Quick Usage
-
-After seeing a suggestion:
+When a new terminal tab opens during work hours, `~/.zshrc` calls:
 
 ```bash
-m1    # Run it
-m2    # Delete (never show again)
-m3    # Try (preview first)
-m4    # Skip (show again later)
+~/repos/idle-maintenance/prompt-suggest.py
 ```
 
-Or use full command:
-```bash
-maint <script-name> [1-4]
-```
-
-## How It Works
-
-1. **Open new tab** → Suggestion appears once
-2. **Type `m1`** → Runs it
-3. **Next tab** → Different suggestion
-
-## Aliases
-
-Defined in `~/.zshrc` (lines 633-636):
+Display format:
 
 ```bash
-alias m1='maint "$_MAINT_CURRENT_SCRIPT" 1'
-alias m2='maint "$_MAINT_CURRENT_SCRIPT" 2'
-alias m3='maint "$_MAINT_CURRENT_SCRIPT" 3'
-alias m4='maint "$_MAINT_CURRENT_SCRIPT" 4'
+brew cleanup -s && brew autoremove • Clean up Homebrew cache and old versions | 1=Run 2=Del 3=Try 4=Skip
 ```
 
-These map to:
-- `m1` → Run
-- `m2` → Delete permanently
-- `m3` → Try (preview first)
-- `m4` → Skip (show later)
+The terminal suggestion list can include low-friction review prompts, not only cleanup commands. GUI shortcut review is intentionally wired here because opening a MacBook or a new terminal tab is already a context-switching moment:
 
-## Implementation
-
-### Environment Variables
-
-**`MAINT_SESSION_ID`** - Stable session identifier
-- Set once per shell in `~/.zshrc` line 3
-- Format: `{pid}_{timestamp}`
-
-**`_MAINT_SHOWN`** - Display flag
-- Set after first prompt in `~/.zshrc` line 627
-- Prevents repeated display
-
-**`_MAINT_CURRENT_SCRIPT`** - Current suggestion
-- Extracted from session.json line 628
-- Used by m1/m2/m3/m4 aliases
-
-## Configuration
-
-### Scan Directories
-
-Edit `prompt-suggest.py` line 20:
-```python
-SCRIPT_DIRS = [
-    os.path.expanduser("~/.local/bin"),
-    os.path.expanduser("~/Dropbox/Mackup/scripts"),
-]
-```
-
-### Add Commands
-
-Edit lines 26-31:
-```python
-COMMON_COMMANDS = [
-    {"cmd": "brew cleanup", "desc": "Clean Homebrew", "freq": 168},
-]
-```
-
-Frequency: 24=daily, 168=weekly, 336=biweekly
-
-### Work Hours
-
-Edit lines 233-235:
-```python
-if current_hour < 9 or current_hour > 20:
-    return None
-```
-
-### Colors
-
-Edit lines 33-43 for your theme.
-
-## Examples
-
-### Basic Usage
 ```bash
-# Open new tab - see:
-Clean Homebrew cache • brew cleanup | 1=Run 2=Del 3=Try 4=Skip
-
-# Type:
-m1
-
-# Output:
-→ Running: Clean Homebrew cache
-$ brew cleanup -s && brew autoremove
-...
-✓ Completed
+/Users/john/.local/bin/kb popup --surface gui --group obsidian-navigation --force
+/Users/john/.local/bin/kb export-srs --mode focused
 ```
 
-### Preview First
+These stay out of the scheduled runner. The prompt asks first; the background job never opens GUI review windows or rewrites flashcard files.
+
+Quick actions are handled by aliases in `~/.zshrc`:
+
 ```bash
-m3
-→ Command: Clean Homebrew cache
-$ brew cleanup -s && brew autoremove
-
-Press Enter to run, Ctrl+C to cancel
+1     # Run it
+2     # Dismiss/delete it
+3     # Try/preview it
+4     # Skip it for now
 ```
 
-### View All
+State lives in:
+
 ```bash
-maint
-
-Available Maintenance Scripts:
-  brew      Clean Homebrew          ✓ 2.3h ago
-  docker    Remove Docker images    3.2d ago
+~/Library/Application Support/idle-maintenance/
 ```
 
-## Files
+Important files:
 
-**Scripts:**
-- `prompt-suggest.py` - Main suggester
-- `~/.local/bin/maint` - Action handler
+- `session.json`: current suggestion per shell session.
+- `state.json`: run/dismiss history.
+- `cache.json`: discovered command cache.
 
-**Data:** `~/Library/Application Support/idle-maintenance/`
-- `cache.json` - Scripts (5min TTL)
-- `state.json` - History
-- `session.json` - Current suggestions
+Suggestions are intentionally silent outside 9am-8pm.
 
-## Troubleshooting
+## Scheduled Runner
 
-### Not showing?
+Launchd runs this job every 15 minutes:
+
 ```bash
-echo $_MAINT_SHOWN    # Should be empty in new tab
-exec zsh              # Reload
+launchctl print gui/$(id -u)/com.john.idle-maintenance
 ```
 
-### m1 not working?
+That LaunchAgent calls:
+
 ```bash
-echo $_MAINT_CURRENT_SCRIPT    # Should show script name
-alias m1                       # Should show alias definition
+/Users/john/Applications/Wiki Automation.app/Contents/MacOS/wiki-automation idle-maintenance
 ```
 
-If empty, no suggestion was shown. Open new tab.
+Which dispatches to:
 
-### Reset
 ```bash
-rm ~/Library/Application\ Support/idle-maintenance/*.json
-unset _MAINT_SHOWN _MAINT_CURRENT_SCRIPT
-exec zsh
+~/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh
 ```
 
-## Changes from Original
+The runner executes at most one due task per launchd tick. Before starting work, and while a task is running, it requires:
 
-**Removed:**
-- `[Maint]` prefix
-- `$ command` (redundant with command name)
-- `→ maint script [1-4]` instruction
-- `per-directory-history` plugin (using autojump)
+- AC power.
+- Enough idle time for that task.
+- 1-minute load average under that task's limit.
 
-**Added:**
-- Quick aliases `m1`, `m2`, `m3`, `m4`
-- Golden/yellow command name
-- Single-line compact format
+Current task policy:
 
-## Performance
+- Homebrew autoupdate: daily, at least 600s idle, load <= 1.2.
+- Cockpit tools update: daily, at least 600s idle, load <= 1.2.
+- yadm auto-push: weekly, at least 300s idle, load <= 2.0.
+- Log pruning: daily, no idle minimum, load <= 4.0.
+- App cleanup review: weekly, at least 600s idle, load <= 1.5.
 
-- First shell: ~0.5s
-- Cached: ~0.2s
-- Session: ~0.05s
-- Alias: instant
+Check status:
 
-## Summary
+```bash
+"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+```
 
-**Simple workflow:**
-1. See suggestion
-2. Type `m1` to run (or `m2`/`m3`/`m4`)
-3. Done
+Logs:
 
-Fast, clean, unobtrusive.
+```bash
+~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
+~/Library/Logs/wiki-automation/idle-maintenance.out.log
+~/Library/Logs/wiki-automation/idle-maintenance.err.log
+```
+
+Deferral log lines include current power source, idle seconds, and 1-minute load so it is clear why work did not run.
+
+## App Cleanup Policy
+
+App cleanup is intentionally configurable. The project owns the cleanup lifecycle:
+
+- detect stale apps;
+- ask before acting;
+- move apps to Trash;
+- write a deletion ledger;
+- call optional hooks before and after deletion.
+
+Local config owns policy, including which apps are considered recoverable.
+
+Config is loaded from the first existing file in this order:
+
+```bash
+~/.config/idle-watcher/config.json
+~/Library/Application Support/idle-maintenance/config.json
+<repo>/config.json
+```
+
+Example:
+
+```json
+{
+  "app_cleanup": {
+    "delete_mode": "trash",
+    "allow_unknown_restore_source": false,
+    "deletion_ledger": "~/Library/Application Support/idle-maintenance/app-deletions.jsonl",
+    "restore_sources": [
+      {
+        "type": "homebrew_bundle",
+        "path": "~/repos/Brewfile"
+      },
+      {
+        "type": "mas_tsv",
+        "path": "~/repos/app-store-apps.tsv"
+      }
+    ]
+  },
+  "hooks": {
+    "before_delete_app": [
+      "~/bin/idle-maintenance-before-delete"
+    ],
+    "after_delete_app": [
+      "~/bin/idle-maintenance-after-delete"
+    ]
+  }
+}
+```
+
+Supported restore source providers:
+
+- `homebrew_bundle`: reads `cask "..."` and `mas "...", id: ...` lines from a Brewfile.
+- `mas_tsv`: reads a tab-separated file with `app_id`, `name`, and optional version columns.
+
+When `allow_unknown_restore_source` is `false`, Delete is refused for apps that are not found in any configured restore source. The prompt still shows the candidate, but marks it as `Restore: unknown; delete disabled`.
+
+Before-delete hooks receive two arguments:
+
+```bash
+hook "$APP_PATH" "$DELETE_CONTEXT_JSON"
+```
+
+A non-zero exit code vetoes deletion. After-delete hooks receive the same shape of JSON plus the ledger fields for the completed Trash action. Hook scripts are a good place to enforce local recovery policy without adding personal backup assumptions to the project.
+
+The deletion ledger is JSONL. Each line records the app path, bundle id, version, Trash path, restore source, restore command, and timestamp.
+
+See `docs/app-cleanup-policy.md` for the full public config contract.
+
+## Legacy GUI Watcher
+
+These files are retained for manual/legacy use:
+
+- `idle_watcher.py`
+- `idle_config.py`
+- `maintenance_interactive.py`
+- `app_auditor.py`
+- `prompt.swift`
+- `app_usage_watcher.swift`
+- `build_app.sh`
+- `deploy.sh`
+- `com.user.idle_maintenance.plist`
+
+They are not the normal background maintenance path. `com.user.idle_maintenance.plist` is kept as a disabled legacy sample only.
+
+The legacy watcher reads configuration from the first available file in this order:
+
+```bash
+~/.config/idle-watcher/config.json
+~/Library/Application Support/idle-maintenance/config.json
+./config.json
+```
+
+If unset, the handoff app defaults to Apple Reminders. Example runtime config:
+
+```json
+{
+  "handoff_app": "Reminders",
+  "idle_threshold_minutes": 10,
+  "check_interval_seconds": 30,
+  "post_trigger_cooldown_seconds": 3600,
+  "max_entries_per_idle_return": 5,
+  "process_high_cpu_threshold": 50.0,
+  "stale_days_limit": 90
+}
+```
+
+## Health Checks
+
+Recommended checks:
+
+```bash
+python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_interactive.py prompt-suggest.py
+swiftc -typecheck prompt.swift
+swiftc -typecheck app_usage_watcher.swift
+launchctl print gui/$(id -u)/com.john.idle-maintenance
+"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+tail -80 ~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
+```
+
+Expected normal state:
+
+- `com.john.idle-maintenance` is loaded.
+- The runner usually exits quickly.
+- Logs may show repeated deferrals during active/heavy use.
+- No resident `idle_watcher.py` or `app_usage_watcher` process is required.
