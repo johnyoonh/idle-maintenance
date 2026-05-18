@@ -1,114 +1,141 @@
-# Troubleshooting: "Shows on every prompt"
+# Troubleshooting
 
-## Problem
-The maintenance suggestion appears on EVERY prompt instead of once per tab.
+## Which System Should Be Running?
 
-## Root Cause
-The `MAINT_SESSION_ID` environment variable is not set in your current shell session.
+Normal background maintenance is handled by:
 
-## Check Current State
+```bash
+com.john.idle-maintenance
+```
+
+Check it with:
+
+```bash
+launchctl print gui/$(id -u)/com.john.idle-maintenance
+```
+
+It runs every 15 minutes through Wiki Automation, exits quickly, and logs to:
+
+```bash
+~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
+```
+
+It is normal for these processes to be absent:
+
+```bash
+idle_watcher.py
+maintenance_interactive.py
+app_usage_watcher
+```
+
+Those belong to the legacy GUI watcher path and are not required for the low-load scheduled runner.
+
+## Scheduled Runner Keeps Deferring
+
+This is usually correct. The runner waits for:
+
+- AC power.
+- Task-specific idle time.
+- Low enough 1-minute load average.
+
+Check the current state:
+
+```bash
+"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+```
+
+Inspect recent decisions:
+
+```bash
+tail -80 ~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
+```
+
+Deferral lines include power source, idle seconds, and load. During active or heavy use, repeated deferrals are expected and protect system responsiveness.
+
+## LaunchAgent Not Loaded
+
+If this fails:
+
+```bash
+launchctl print gui/$(id -u)/com.john.idle-maintenance
+```
+
+Check the source plist:
+
+```bash
+plutil -lint "$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/launchagents/com.john.idle-maintenance.plist"
+```
+
+Then inspect the Wiki Automation logs:
+
+```bash
+ls -l ~/Library/Logs/wiki-automation/idle-maintenance*.log
+tail -80 ~/Library/Logs/wiki-automation/idle-maintenance.err.log
+```
+
+Do not debug `com.user.idle_maintenance.plist` for normal operation. That file is legacy and points at an older resident watcher model.
+
+## Terminal Suggestion Not Showing
+
+Terminal suggestions are separate from the scheduled runner. They appear only once per shell tab and only during 9am-8pm.
+
+Check the shell session:
 
 ```bash
 echo $MAINT_SESSION_ID
+echo $_MAINT_SHOWN
+echo $_MAINT_CURRENT_SCRIPT
 ```
 
-**Expected:** `12345_1234567890` (PID_timestamp format)
-**Problem:** Empty or not set
+Reload the shell:
 
-## Solutions
-
-### Option 1: Open New iTerm2 Tab (Recommended)
-Press `Cmd+T` to open a completely new tab. The new tab will have `MAINT_SESSION_ID` set.
-
-### Option 2: Reload Shell
 ```bash
 exec zsh
 ```
 
-This restarts your shell and sources `~/.zshrc` fresh.
-
-### Option 3: Source Manually
-```bash
-source ~/.zshrc
-```
-
-Note: This may not work if `MAINT_SESSION_ID` was already set.
-
-## Verify It's Working
-
-After opening a new tab or reloading:
+Run the suggester manually:
 
 ```bash
-# Check env var is set
-echo $MAINT_SESSION_ID
-# Should show: 12345_1234567890
-
-# Press Enter a few times
-# Same suggestion should appear each time
+MAINT_SESSION_ID="manual_test_$(date +%s)" ~/repos/idle-maintenance/prompt-suggest.py
 ```
 
-## How It Works
+If it is outside work hours, no output is expected.
 
-**File:** `~/.zshrc` (lines 2-5)
+## Terminal Action Alias Not Working
+
+Check aliases:
+
 ```bash
-if [[ -z "$MAINT_SESSION_ID" ]]; then
-    export MAINT_SESSION_ID="$$_$(date +%s)"
-fi
+alias 1
+alias 2
+alias 3
+alias 4
 ```
 
-This runs ONCE when the shell starts:
-- `$$` = Current shell PID (unique per tab)
-- `$(date +%s)` = Unix timestamp when shell started
-- Together = Stable ID for this tab's entire lifetime
+Check the current session record:
 
-## Session Behavior
-
-**Open new tab:**
-- `.zshrc` runs → Sets `MAINT_SESSION_ID="12345_1234567890"`
-- First `precmd()` → Picks random suggestion → Saves to session.json
-- Every subsequent `precmd()` → Returns same suggestion
-
-**Take action** (`maint <id> [1-4]`):
-- Executes action
-- Clears session.json entry for this session ID
-- Next tab gets different suggestion
-
-## Still Not Working?
-
-### Debug: Check session.json
 ```bash
-cat ~/Library/Application\ Support/idle-maintenance/session.json | jq
+jq ".[\"$MAINT_SESSION_ID\"]" ~/Library/Application\ Support/idle-maintenance/session.json
 ```
 
-You should see entries like:
-```json
-{
-  "12345_1234567890": {
-    "timestamp": 1774135000,
-    "suggestion": {...}
-  }
-}
-```
+If `_MAINT_CURRENT_SCRIPT` is empty, no suggestion was shown for that shell session.
 
-### Debug: Manual test
-```bash
-export MAINT_SESSION_ID="test_manual_123"
-~/Dropbox/Mackup/scripts/idle-maintenance/prompt-suggest.py
-# Press up arrow and Enter to run again
-# Should show SAME suggestion both times
-```
+## Reset Terminal Suggestion State
 
-### Reset Everything
+This resets prompt suggestions only. It does not affect the scheduled runner.
+
 ```bash
 rm ~/Library/Application\ Support/idle-maintenance/session.json
+unset _MAINT_SHOWN _MAINT_CURRENT_SCRIPT
 exec zsh
 ```
 
-## Expected Behavior
+## Health Check Commands
 
-✅ **Correct:** Same suggestion appears before every prompt in a tab
-✅ **Correct:** Different suggestions in different tabs
-✅ **Correct:** New suggestion after taking action
-❌ **Wrong:** Different suggestion on every prompt in same tab
-
-The "showing on every prompt" is actually a FEATURE - it's a reminder system. The issue is when it shows a DIFFERENT suggestion each time.
+```bash
+python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_interactive.py prompt-suggest.py
+swiftc -typecheck prompt.swift
+swiftc -typecheck app_usage_watcher.swift
+launchctl print gui/$(id -u)/com.john.idle-maintenance
+"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+```
