@@ -10,6 +10,7 @@ echo "Deploying Idle Maintenance to $DEST..."
 
 # 1. Copy core scripts (always overwrite with latest logic)
 cp app_auditor.py "$DEST/"
+cp idle_config.py "$DEST/"
 cp idle_watcher.py "$DEST/"
 cp maintenance_interactive.py "$DEST/"
 cp prompt.swift "$DEST/"

@@ -3,10 +3,14 @@ import os
 
 APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/idle-maintenance")
 XDG_CONFIG_DIR = os.path.expanduser("~/.config/idle-watcher")
-DEFAULT_HANDOFF_APP = "Reminders"
+DEFAULT_HANDOFF_APP = "TaskForge"
+DEFAULT_HANDOFF_URL = "taskforge://upcoming"
 
 DEFAULT_CONFIG = {
     "handoff_app": DEFAULT_HANDOFF_APP,
+    "handoff_url": DEFAULT_HANDOFF_URL,
+    "show_shortcuts_on_finish": True,
+    "shortcut_review_command": "/Users/john/.local/bin/kb popup --surface gui --group obsidian-taskforge --force",
     "idle_threshold_minutes": 10,
     "check_interval_seconds": 30,
     "post_trigger_cooldown_seconds": 3600,
@@ -86,3 +90,11 @@ def get_handoff_app(config):
     if target_app in {"TickTick", "Ticktick"}:
         target_app = DEFAULT_HANDOFF_APP
     return target_app
+
+def get_handoff_url(config):
+    return config.get("handoff_url", DEFAULT_HANDOFF_URL)
+
+def get_shortcut_review_command(config):
+    if config.get("show_shortcuts_on_finish", True):
+        return config.get("shortcut_review_command") or DEFAULT_CONFIG["shortcut_review_command"]
+    return ""
