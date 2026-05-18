@@ -19,9 +19,9 @@
 *   **Trigger:** Files older than 30 days or larger than 1GB.
 *   **Actions:** Move to Archive, Delete to Trash, QuickLook (Try).
 
-## 4. TickTick Task Review
+## 4. Handoff App Task Review
 *   **Goal:** Surface overdue or "Someday" tasks that need a decision.
-*   **Actions:** Complete, Delete, Open in TickTick (Try), Reschedule (Skip).
+*   **Actions:** Complete, Delete, Open in the configured handoff app (Try), Reschedule (Skip).
 
 ## 5. Financial Audit (High Transaction Confirmation)
 *   **Goal:** Flag major expenses from bank exports for manual confirmation.
