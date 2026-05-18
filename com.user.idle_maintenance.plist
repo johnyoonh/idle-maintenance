@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Legacy resident GUI watcher sample. Normal background maintenance uses
+     com.john.idle-maintenance via Wiki Automation; do not install this for
+     the low-load scheduled runner. -->
 <dict>
+    <key>Disabled</key>
+    <true/>
     <key>Label</key>
-    <string>com.user.idle_maintenance</string>
+    <string>com.user.idle_maintenance.legacy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/john/Dropbox/Mackup/scripts/idle-maintenance/idle_watcher.py</string>
+        <string>/Users/john/repos/idle-maintenance/idle_watcher.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
