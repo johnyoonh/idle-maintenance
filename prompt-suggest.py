@@ -241,11 +241,12 @@ def discover_scripts():
     # Add common commands (with current time so they appear at top of stack)
     for cmd_info in COMMON_COMMANDS:
         scripts.append({
-            "script": cmd_info["cmd"].split()[0],  # First word as ID
+            "script": cmd_info.get("id") or cmd_info["cmd"].split()[0],  # First word as ID unless pinned
             "command": cmd_info["cmd"],
             "description": cmd_info["desc"],
             "frequency_hours": cmd_info["freq"],
             "mtime": time.time(),  # Current time for common commands
+            "protected": bool(cmd_info.get("protected")),
         })
 
     # Sort by modification time DESC (newest first - LIFO stack)
