@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-05-06 - Scheduled Runner Is Authoritative
+
+### What Changed
+
+- Documented `com.john.idle-maintenance` / `wiki-automation idle-maintenance` as the normal background maintenance path.
+- Added `--status` support to the live `idle_maintenance_runner.sh` script used by launchd.
+- Expanded runner deferral logs to include power source, current idle seconds, and current 1-minute load.
+- Marked the resident `IdleMaintenance.app` / `idle_watcher.py` GUI watcher path as legacy/manual.
+
+### Why
+
+The scheduled runner is lower load and better behaved during active or heavy system use. It wakes on launchd's 15-minute interval, runs at most one due task, and only works when AC power, idle time, and load thresholds are acceptable.
+
+### Operational Check
+
+```bash
+launchctl print gui/$(id -u)/com.john.idle-maintenance
+"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+tail -80 ~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
+```
+
+---
+
 ## Final Version - Show Once Per Tab
 
 ### What Changed
