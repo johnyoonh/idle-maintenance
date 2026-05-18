@@ -29,6 +29,20 @@ COMMON_COMMANDS = [
     {"cmd": "docker system prune -af --volumes", "desc": "Remove unused Docker images and containers", "freq": 168},
     {"cmd": "bw sync", "desc": "Sync Bitwarden vault with server", "freq": 24},
     {"cmd": "chezmoi update && chezmoi apply", "desc": "Update dotfiles from Bitwarden", "freq": 24},
+    {
+        "id": "kb-gui-review",
+        "cmd": "/Users/john/.local/bin/kb popup --surface gui --group obsidian-navigation --force",
+        "desc": "Review Obsidian navigation shortcuts while you are already in context-switching mode",
+        "freq": 24,
+        "protected": True,
+    },
+    {
+        "id": "kb-srs-focused",
+        "cmd": "/Users/john/.local/bin/kb export-srs --mode focused",
+        "desc": "Refresh focused shortcut flashcards for Obsidian SRS",
+        "freq": 168,
+        "protected": True,
+    },
 ]
 
 # ANSI colors
