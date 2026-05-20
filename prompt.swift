@@ -16,6 +16,7 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var mode: String = "app"
     var detailText: String = ""
     var statusItem: NSStatusItem?
+    var deleteEnabled: Bool = true
     
     init(name: String, path: String) {
         self.appName = name
@@ -58,14 +59,48 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let menu = NSMenu(title: "Idle Maintenance")
         menu.addItem(withTitle: "Show Idle Maintenance", action: #selector(showWindow), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "1. Keep", action: #selector(onKeep), keyEquivalent: "1")
-        menu.addItem(withTitle: mode == "process" ? "2. Kill" : "2. Delete", action: #selector(onDelete), keyEquivalent: "2")
-        menu.addItem(withTitle: mode == "process" ? "3. Investigate" : "3. Try", action: #selector(onTry), keyEquivalent: "3")
-        menu.addItem(withTitle: "4. Skip", action: #selector(onSkip), keyEquivalent: "4")
+        let keepItem = menu.addItem(withTitle: "1. Keep", action: #selector(onKeep), keyEquivalent: "1")
+        keepItem.toolTip = tooltipFor(action: "KEEP")
+
+        let deleteItem = menu.addItem(withTitle: mode == "process" ? "2. Kill" : "2. Delete", action: #selector(onDelete), keyEquivalent: "2")
+        deleteItem.toolTip = tooltipFor(action: mode == "process" ? "KILL" : "DELETE")
+        deleteItem.isEnabled = mode == "process" || deleteEnabled
+
+        let tryItem = menu.addItem(withTitle: mode == "process" ? "3. Investigate" : "3. Try", action: #selector(onTry), keyEquivalent: "3")
+        tryItem.toolTip = tooltipFor(action: mode == "process" ? "INVESTIGATE" : "TRY")
+
+        let skipItem = menu.addItem(withTitle: "4. Skip", action: #selector(onSkip), keyEquivalent: "4")
+        skipItem.toolTip = tooltipFor(action: "SKIP")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit", action: #selector(onQuit), keyEquivalent: "q")
         item.menu = menu
         statusItem = item
+    }
+
+    func tooltipFor(action: String) -> String {
+        switch action {
+        case "KEEP":
+            return mode == "process"
+                ? "Ignore this process for now and wait longer before asking again."
+                : "Keep this app and wait longer before asking about it again."
+        case "DELETE":
+            if !deleteEnabled {
+                return "Delete is disabled because this app has no configured restore source."
+            }
+            return "Move this app to Trash and record it in the deletion ledger."
+        case "KILL":
+            return "Terminate the selected high-impact process."
+        case "TRY":
+            return "Open the app so you can review it before deciding."
+        case "INVESTIGATE":
+            return "Open a Codex investigation prompt for this process."
+        case "SKIP":
+            return mode == "process"
+                ? "Leave this process alone and ask again later."
+                : "Leave this app installed and ask again later."
+        default:
+            return ""
+        }
     }
 
     @objc func showWindow() {
@@ -151,28 +186,36 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let action1 = "Keep"
         let btn1 = NSButton(title: "1. " + action1, target: self, action: #selector(onKeep))
         btn1.frame = NSRect(x: startX, y: 50, width: buttonWidth, height: buttonHeight)
+        btn1.toolTip = tooltipFor(action: "KEEP")
         contentView.addSubview(btn1)
         
         let action2 = (mode == "process") ? "Kill" : "Delete"
         let btn2 = NSButton(title: "2. " + action2, target: self, action: #selector(onDelete))
         btn2.frame = NSRect(x: startX + buttonWidth + spacing, y: 50, width: buttonWidth, height: buttonHeight)
+        btn2.toolTip = tooltipFor(action: mode == "process" ? "KILL" : "DELETE")
+        btn2.isEnabled = mode == "process" || deleteEnabled
         contentView.addSubview(btn2)
         
         let action3 = (mode == "process") ? "Investigate" : "Try"
         let btn3 = NSButton(title: "3. " + action3, target: self, action: #selector(onTry))
         btn3.frame = NSRect(x: startX + (buttonWidth + spacing) * 2, y: 50, width: buttonWidth, height: buttonHeight)
+        btn3.toolTip = tooltipFor(action: mode == "process" ? "INVESTIGATE" : "TRY")
         contentView.addSubview(btn3)
         
         let action4 = "Skip"
         let btn4 = NSButton(title: "4. " + action4, target: self, action: #selector(onSkip))
         btn4.frame = NSRect(x: startX + (buttonWidth + spacing) * 3, y: 50, width: buttonWidth, height: buttonHeight)
+        btn4.toolTip = tooltipFor(action: "SKIP")
         contentView.addSubview(btn4)
         
         // --- KEY LISTENERS ---
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             switch event.characters {
             case "1": self.finish("KEEP")
-            case "2": self.finish(self.mode == "process" ? "KILL" : "DELETE")
+            case "2":
+                if self.mode == "process" || self.deleteEnabled {
+                    self.finish(self.mode == "process" ? "KILL" : "DELETE")
+                }
             case "3": self.finish(self.mode == "process" ? "INVESTIGATE" : "TRY")
             case "4": self.finish("SKIP")
             case "\u{1B}": self.finish("QUIT")
@@ -185,7 +228,11 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     @objc func onKeep() { finish("KEEP") }
-    @objc func onDelete() { finish(mode == "process" ? "KILL" : "DELETE") }
+    @objc func onDelete() {
+        if mode == "process" || deleteEnabled {
+            finish(mode == "process" ? "KILL" : "DELETE")
+        }
+    }
     @objc func onTry() { finish(mode == "process" ? "INVESTIGATE" : "TRY") }
     @objc func onSkip() { finish("SKIP") }
     @objc func onQuit() { finish("QUIT") }
@@ -223,6 +270,7 @@ if args.count > 5 && args[4].hasPrefix("__MODE__=") {
 } else if args.count > 4 {
     delegate.detailText = args[4]
 }
+delegate.deleteEnabled = !delegate.detailText.contains("delete disabled")
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

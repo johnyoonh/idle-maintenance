@@ -26,6 +26,22 @@ def log(msg):
     with open(LOG_PATH, "a") as f:
         f.write(f"[{timestamp}] {msg}\n")
 
+def notify_user(title, message):
+    script = '''
+on run argv
+    display notification (item 2 of argv) with title (item 1 of argv)
+end run
+'''
+    try:
+        subprocess.run(
+            ["osascript", "-"] + [title, message],
+            input=script,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        pass
+
 def is_running():
     if os.path.exists(LOCK_FILE):
         try:
@@ -164,6 +180,52 @@ def run_delete_hooks(hook_paths, payload):
             log(f"Delete hook {hook_path} vetoed {payload['app_path']} with exit {result.returncode}: {details}")
             return False
     return True
+
+def run_osascript(script, args):
+    return subprocess.run(
+        ["osascript", "-"] + args,
+        input=script,
+        capture_output=True,
+        text=True,
+    )
+
+def trash_with_finder(app_path):
+    script = '''
+on run argv
+    set appPath to item 1 of argv
+    tell application "Finder"
+        delete POSIX file appPath
+    end tell
+    return "true"
+end run
+'''
+    result = run_osascript(script, [app_path])
+    if result.returncode == 0 and "true" in result.stdout.lower():
+        return True
+    details = (result.stderr or result.stdout).strip()
+    log(f"Finder failed to trash {app_path}: {details}")
+    return False
+
+def trash_with_admin_mv(app_path, dest_path):
+    script = '''
+on run argv
+    set appPath to item 1 of argv
+    set destPath to item 2 of argv
+    set userName to item 3 of argv
+    set groupName to item 4 of argv
+    set shellCommand to "mkdir -p " & quoted form of POSIX path of (path to trash folder) & " && mv " & quoted form of appPath & " " & quoted form of destPath & " && chown -R " & quoted form of (userName & ":" & groupName) & " " & quoted form of destPath
+    do shell script shellCommand with administrator privileges
+    return "true"
+end run
+'''
+    user_name = os.getenv("USER", "")
+    group_name = subprocess.check_output(["id", "-gn"], text=True).strip()
+    result = run_osascript(script, [app_path, dest_path, user_name, group_name])
+    if result.returncode == 0 and "true" in result.stdout.lower():
+        return True
+    details = (result.stderr or result.stdout).strip()
+    log(f"Admin move failed to trash {app_path}: {details}")
+    return False
 
 def prompt_user(app_path, close_on_unfocus=True, last_used=""):
     app_name = os.path.basename(app_path)
@@ -538,10 +600,12 @@ def delete_app(app_path, config):
 
     if delete_mode != "trash":
         log(f"Refusing to delete {app_path}; unsupported delete_mode={delete_mode}.")
+        notify_user("Idle Maintenance", f"Delete refused for {os.path.basename(app_path)}: unsupported delete mode.")
         return False
 
     if restore_source.get("source") == "unknown" and not allow_unknown:
         log(f"Refusing to delete unrecoverable app {app_path}; no Brewfile or MAS restore source found.")
+        notify_user("Idle Maintenance", f"Delete refused for {os.path.basename(app_path)}: no restore source is configured.")
         return False
 
     metadata = app_metadata(app_path)
@@ -555,6 +619,7 @@ def delete_app(app_path, config):
         "version": metadata.get("short_version") or metadata.get("version", ""),
     }
     if not run_delete_hooks(hooks.get("before_delete_app", []), hook_payload):
+        notify_user("Idle Maintenance", f"Delete refused for {os.path.basename(app_path)}: a before-delete hook vetoed it.")
         return False
 
     app_name = os.path.basename(app_path)
@@ -591,23 +656,15 @@ def delete_app(app_path, config):
         return True
     except Exception as e:
         log(f"Failed to trash {app_path} via shutil (falling back to AppleScript): {e}")
-        applescript = f'''
-        tell application "Finder"
-            try
-                delete POSIX file "{app_path}"
-                return true
-            on error
-                return false
-            end try
-        end tell
-        '''
-        res = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
-        success = "true" in res.stdout.lower()
+        success = trash_with_finder(app_path)
+        if not success:
+            success = trash_with_admin_mv(app_path, dest_path)
         if success:
-            ledger_entry["action"] = "finder-trash"
-            ledger_entry["trash_path"] = ""
+            ledger_entry["action"] = "applescript-trash"
             append_jsonl(ledger_path, ledger_entry)
             run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
+        else:
+            notify_user("Idle Maintenance", f"Could not move {os.path.basename(app_path)} to Trash. See IdleMaintenance.log.")
         return success
 
 def main():
@@ -679,8 +736,12 @@ def main():
             while not app_done and processed < max_prompts:
                 last_used_info = stale_dates.get(item["path"], "Unknown")
                 restore_source = get_restore_source(config, item["path"])
-                if restore_source.get("source") == "unknown":
+                cleanup, _ = app_cleanup_config(config)
+                allow_unknown_restore = bool(cleanup.get("allow_unknown_restore_source", False))
+                if restore_source.get("source") == "unknown" and not allow_unknown_restore:
                     last_used_info += " • Restore: unknown; delete disabled"
+                elif restore_source.get("source") == "unknown":
+                    last_used_info += " • Restore: unknown"
                 else:
                     last_used_info += f" • Restore: {restore_source.get('restore_command', restore_source.get('source'))}"
                 if item.get("last_prompted", 0) > 0:
