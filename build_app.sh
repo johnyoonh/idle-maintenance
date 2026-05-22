@@ -26,6 +26,10 @@ struct WatchJobsFile: Decodable {
     let jobs: [String: WatchJob]
 }
 
+struct HealthChecksFile: Decodable {
+    let healthChecks: [String: HealthCheck]?
+}
+
 struct WatchJob: Decodable {
     let watchDirectory: String
     let filePrefix: String
@@ -39,9 +43,18 @@ struct WatchJob: Decodable {
     let processName: String?
 }
 
+struct HealthCheck: Decodable {
+    let processName: String
+    let appPath: String
+    let stateFile: String?
+    let lockFile: String?
+    let minimumRelaunchIntervalSeconds: Double?
+}
+
 enum WatchJobError: Error, CustomStringConvertible {
     case missingConfig(String)
     case missingJob(String)
+    case missingHealthCheck(String)
     case invalidLock
 
     var description: String {
@@ -50,6 +63,8 @@ enum WatchJobError: Error, CustomStringConvertible {
             return "watch job config is missing: \(path)"
         case .missingJob(let name):
             return "watch job is not configured: \(name)"
+        case .missingHealthCheck(let name):
+            return "health check is not configured: \(name)"
         case .invalidLock:
             return "unable to create alert lock"
         }
@@ -91,6 +106,20 @@ func defaultAlertLockFile(jobName: String) -> String {
         .path
 }
 
+func defaultHealthStateFile(name: String) -> String {
+    appSupportDirectory()
+        .appendingPathComponent("health-checks")
+        .appendingPathComponent("\(name).last-reopen")
+        .path
+}
+
+func defaultHealthLockFile(name: String) -> String {
+    appSupportDirectory()
+        .appendingPathComponent("health-checks")
+        .appendingPathComponent("\(name).lock")
+        .path
+}
+
 func readWatchJob(name: String, configPath: String = defaultWatchJobsConfigPath()) throws -> WatchJob {
     let url = URL(fileURLWithPath: expandedPath(configPath))
     guard FileManager.default.fileExists(atPath: url.path) else {
@@ -103,6 +132,20 @@ func readWatchJob(name: String, configPath: String = defaultWatchJobsConfigPath(
         throw WatchJobError.missingJob(name)
     }
     return job
+}
+
+func readHealthCheck(name: String, configPath: String = defaultWatchJobsConfigPath()) throws -> HealthCheck {
+    let url = URL(fileURLWithPath: expandedPath(configPath))
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        throw WatchJobError.missingConfig(url.path)
+    }
+
+    let data = try Data(contentsOf: url)
+    let file = try JSONDecoder().decode(HealthChecksFile.self, from: data)
+    guard let check = file.healthChecks?[name] else {
+        throw WatchJobError.missingHealthCheck(name)
+    }
+    return check
 }
 
 func newestMatchingFile(job: WatchJob) throws -> URL? {
@@ -171,6 +214,10 @@ func createAlertLock(path: String) throws -> FileHandle? {
         try handle.write(contentsOf: data)
     }
     return handle
+}
+
+func createProcessLock(path: String) throws -> FileHandle? {
+    try createAlertLock(path: path)
 }
 
 func extractTimestamp(from report: URL, regex pattern: String?) -> String {
@@ -257,6 +304,40 @@ func runWatchJob(name: String) throws {
             configuration: NSWorkspace.OpenConfiguration()
         )
     }
+}
+
+func runHealthCheck(name: String) throws {
+    let check = try readHealthCheck(name: name)
+    if isProcessRunning(name: check.processName) {
+        return
+    }
+
+    let lockPath = expandedPath(check.lockFile ?? defaultHealthLockFile(name: name))
+    guard let lockHandle = try createProcessLock(path: lockPath) else {
+        return
+    }
+    defer {
+        try? lockHandle.close()
+        try? FileManager.default.removeItem(atPath: lockPath)
+    }
+
+    if isProcessRunning(name: check.processName) {
+        return
+    }
+
+    let statePath = expandedPath(check.stateFile ?? defaultHealthStateFile(name: name))
+    let now = Date().timeIntervalSince1970
+    let minimumInterval = check.minimumRelaunchIntervalSeconds ?? 300
+    if let lastReopen = Double(readStringIfPresent(statePath)),
+       now - lastReopen < minimumInterval {
+        return
+    }
+
+    NSWorkspace.shared.openApplication(
+        at: URL(fileURLWithPath: expandedPath(check.appPath)),
+        configuration: NSWorkspace.OpenConfiguration()
+    )
+    try writeString(String(Int(now)), to: statePath)
 }
 
 final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
@@ -422,6 +503,16 @@ if CommandLine.arguments.count >= 3 && CommandLine.arguments[1] == "run-watch-jo
         exit(0)
     } catch {
         FileHandle.standardError.write(Data("IdleMaintenance watch job failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+if CommandLine.arguments.count >= 3 && CommandLine.arguments[1] == "run-health-check" {
+    do {
+        try runHealthCheck(name: CommandLine.arguments[2])
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("IdleMaintenance health check failed: \(error)\n".utf8))
         exit(1)
     }
 }
