@@ -25,7 +25,7 @@ The terminal suggestion list can include low-friction review prompts, not only c
 
 ```bash
 /Users/john/.local/bin/kb popup --surface gui --group obsidian-navigation --force
-/Users/john/.local/bin/kb export-srs --mode focused
+/Users/john/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0
 ```
 
 These stay out of the scheduled runner. The prompt asks first; the background job never opens GUI review windows or rewrites flashcard files.

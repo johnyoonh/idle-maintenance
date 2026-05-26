@@ -38,7 +38,7 @@ COMMON_COMMANDS = [
     },
     {
         "id": "kb-srs-focused",
-        "cmd": "/Users/john/.local/bin/kb export-srs --mode focused",
+        "cmd": "/Users/john/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
         "desc": "Refresh focused shortcut flashcards for Obsidian SRS",
         "freq": 168,
         "protected": True,
