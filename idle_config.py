@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     "max_prompts": 5,
     "max_entries_per_idle_return": 5,
     "close_on_unfocus": True,
+    "app_usage_minimum_dwell_seconds": 120,
     "process_max_prompts": 5,
     "process_high_cpu_threshold": 50.0,
     "process_long_running_hours": 24,

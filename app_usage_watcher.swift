@@ -4,8 +4,11 @@ import Foundation
 
 let stateDir = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/idle-maintenance")
+let xdgConfigDir = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".config/idle-watcher")
 let usagePath = stateDir.appendingPathComponent("app_usage.json")
 let lockPath = URL(fileURLWithPath: "/tmp/idle_maintenance_app_usage_watcher.lock")
+let defaultMinimumDwellSeconds: TimeInterval = 120
 
 func writeLock() {
     let pid = String(ProcessInfo.processInfo.processIdentifier)
@@ -29,12 +32,58 @@ func canonicalPath(_ url: URL) -> String {
     url.standardizedFileURL.resolvingSymlinksInPath().path
 }
 
+func executableConfigPath() -> URL? {
+    guard let executable = CommandLine.arguments.first, !executable.isEmpty else {
+        return nil
+    }
+
+    return URL(fileURLWithPath: executable)
+        .deletingLastPathComponent()
+        .appendingPathComponent("config.json")
+}
+
+func configPaths() -> [URL] {
+    var paths = [
+        xdgConfigDir.appendingPathComponent("config.json"),
+        stateDir.appendingPathComponent("config.json"),
+    ]
+    if let executableConfig = executableConfigPath() {
+        paths.append(executableConfig)
+    }
+    return paths
+}
+
+func configuredMinimumDwellSeconds() -> TimeInterval {
+    for path in configPaths() {
+        guard
+            let data = try? Data(contentsOf: path),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let value = object["app_usage_minimum_dwell_seconds"]
+        else {
+            continue
+        }
+
+        if let seconds = value as? NSNumber {
+            return max(0, seconds.doubleValue)
+        }
+        if let seconds = value as? String, let parsed = Double(seconds) {
+            return max(0, parsed)
+        }
+    }
+
+    return defaultMinimumDwellSeconds
+}
+
 final class AppUsageRecorder {
     private var usage: [String: TimeInterval] = [:]
     private var lastPath = ""
     private var lastWrite: TimeInterval = 0
+    private var pendingPath = ""
+    private var pendingSince: TimeInterval = 0
+    private let minimumDwellSeconds: TimeInterval
 
-    init() {
+    init(minimumDwellSeconds: TimeInterval = configuredMinimumDwellSeconds()) {
+        self.minimumDwellSeconds = minimumDwellSeconds
         load()
     }
 
@@ -46,7 +95,7 @@ final class AppUsageRecorder {
         usage = decoded
     }
 
-    func record(_ app: NSRunningApplication?) {
+    func observeActivation(_ app: NSRunningApplication?) {
         guard let bundleURL = app?.bundleURL else {
             return
         }
@@ -57,6 +106,36 @@ final class AppUsageRecorder {
         }
 
         let now = Date().timeIntervalSince1970
+        pendingPath = path
+        pendingSince = now
+
+        if minimumDwellSeconds <= 0 {
+            record(path, at: now)
+            return
+        }
+
+        Timer.scheduledTimer(withTimeInterval: minimumDwellSeconds, repeats: false) { [weak self] _ in
+            self?.recordIfStillFrontmost(path: path, since: now)
+        }
+    }
+
+    func recordIfStillFrontmost(path: String, since: TimeInterval) {
+        guard pendingPath == path, pendingSince == since else {
+            return
+        }
+
+        guard let frontmostURL = NSWorkspace.shared.frontmostApplication?.bundleURL else {
+            return
+        }
+
+        guard canonicalPath(frontmostURL) == path else {
+            return
+        }
+
+        record(path, at: Date().timeIntervalSince1970)
+    }
+
+    func record(_ path: String, at now: TimeInterval) {
         if path == lastPath && now - lastWrite < 60 {
             return
         }
@@ -95,16 +174,8 @@ workspaceCenter.addObserver(
     object: nil,
     queue: .main
 ) { notification in
-    recorder.record(notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+    recorder.observeActivation(notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
 }
 
-workspaceCenter.addObserver(
-    forName: NSWorkspace.didLaunchApplicationNotification,
-    object: nil,
-    queue: .main
-) { notification in
-    recorder.record(notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
-}
-
-recorder.record(NSWorkspace.shared.frontmostApplication)
+recorder.observeActivation(NSWorkspace.shared.frontmostApplication)
 RunLoop.main.run()
