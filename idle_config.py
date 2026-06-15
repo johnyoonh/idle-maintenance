@@ -5,6 +5,7 @@ APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/idle-mainten
 XDG_CONFIG_DIR = os.path.expanduser("~/.config/idle-watcher")
 DEFAULT_HANDOFF_APP = "TaskForge"
 DEFAULT_HANDOFF_URL = "taskforge://upcoming"
+LOCAL_BIN_DIR = os.path.expanduser("~/.local/bin")
 
 DEFAULT_CONFIG = {
     "handoff_app": DEFAULT_HANDOFF_APP,
@@ -30,6 +31,11 @@ DEFAULT_CONFIG = {
     "process_keep_days_limit": 1,
     "process_keep_backoff_multiplier": 2.0,
     "process_keep_backoff_max_days": 30,
+    "return_from_away_minutes": 15,
+    "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group obsidian-navigation --force",
+    "return_flashcard_refresh_command": f"{LOCAL_BIN_DIR}/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
+    "return_handoff_command": "open -a Flow",
+    "return_handoff_delay_seconds": 90,
     "app_cleanup": {
         "delete_mode": "trash",
         "allow_unknown_restore_source": False,
