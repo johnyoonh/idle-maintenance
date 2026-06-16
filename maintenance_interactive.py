@@ -442,9 +442,31 @@ def run_applescript(script, args):
     cmd.extend(args)
     return subprocess.run(cmd, capture_output=True, text=True)
 
-def open_codex_in_terminal(prompt_text):
+def process_cwd(proc, default="/"):
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(proc["pid"]), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("n"):
+                    cwd = line[1:]
+                    if os.path.isabs(cwd) and os.path.isdir(cwd):
+                        return cwd
+    except Exception as e:
+        log(f"Failed to resolve cwd for process {proc.get('pid', '?')}: {e}")
+    return default
+
+def build_codex_investigation_command(prompt_text, cwd="/"):
+    launch_cwd = cwd if os.path.isabs(cwd) and os.path.isdir(cwd) else "/"
+    return "cd " + shlex.quote(launch_cwd) + " && codex " + shlex.quote(prompt_text)
+
+def open_codex_in_terminal(prompt_text, cwd="/"):
     prompt_copied = copy_text_to_clipboard(prompt_text)
-    codex_command = "codex " + shlex.quote(prompt_text)
+    codex_command = build_codex_investigation_command(prompt_text, cwd)
 
     iterm_script = """
 on run argv
@@ -557,7 +579,8 @@ def run_process_audit(config, prompt_budget=None):
             continue
         if action == "INVESTIGATE":
             prompt_text = build_process_investigation_prompt(proc)
-            opened, terminal_app, prompt_copied = open_codex_in_terminal(prompt_text)
+            cwd = process_cwd(proc)
+            opened, terminal_app, prompt_copied = open_codex_in_terminal(prompt_text, cwd)
             if not opened:
                 if prompt_copied:
                     log(f"Copied Codex investigation prompt for {proc['comm']} to clipboard.")
@@ -569,7 +592,7 @@ def run_process_audit(config, prompt_budget=None):
             save_json(PROCESS_QUEUE_PATH, current_queue)
             processed += 1
             if opened:
-                log(f"Opened Codex investigation for {proc['comm']} in {terminal_app}.")
+                log(f"Opened Codex investigation for {proc['comm']} in {terminal_app} at {cwd}.")
             continue
         if action == "TRY":
             subprocess.run(["open", "-a", "Activity Monitor"], stderr=subprocess.DEVNULL)
@@ -582,9 +605,8 @@ def run_process_audit(config, prompt_budget=None):
             continue
 
         # SKIP
-        for q_item in current_queue:
-            if q_item.get("comm") == item["comm"]:
-                q_item["last_prompted"] = int(time.time())
+        record_keep(process_whitelist, item["comm"])
+        current_queue = [i for i in current_queue if i.get("comm") != item["comm"]]
         processed += 1
 
     save_json(PROCESS_QUEUE_PATH, current_queue)

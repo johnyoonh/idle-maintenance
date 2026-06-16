@@ -93,10 +93,10 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case "TRY":
             return "Open the app so you can review it before deciding."
         case "INVESTIGATE":
-            return "Open a Codex investigation prompt for this process."
+            return "Open a Codex investigation prompt for this process in a terminal tab."
         case "SKIP":
             return mode == "process"
-                ? "Leave this process alone and ask again later."
+                ? "Leave this process alone and suppress future prompts for the backoff window."
                 : "Leave this app installed and ask again later."
         default:
             return ""
@@ -106,6 +106,43 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func showWindow() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func processCPUValue() -> Double? {
+        guard mode == "process" else { return nil }
+        let pattern = #"CPU ([0-9]+(?:\.[0-9]+)?)%"#
+        guard let range = detailText.range(of: pattern, options: .regularExpression) else {
+            return nil
+        }
+        let match = String(detailText[range])
+        let numberText = match
+            .replacingOccurrences(of: "CPU ", with: "")
+            .replacingOccurrences(of: "%", with: "")
+        return Double(numberText)
+    }
+
+    func processDetailWithoutCPU() -> String {
+        guard mode == "process" else { return detailText }
+        var text = detailText
+        if let range = text.range(of: #" ?• ?CPU [0-9]+(?:\.[0-9]+)?% ?"#, options: .regularExpression) {
+            text.removeSubrange(range)
+        } else if let range = text.range(of: #"CPU [0-9]+(?:\.[0-9]+)?% ?"#, options: .regularExpression) {
+            text.removeSubrange(range)
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func cpuSeverityColor(_ cpu: Double) -> NSColor {
+        if cpu >= 200 {
+            return .systemPurple
+        }
+        if cpu >= 100 {
+            return .systemRed
+        }
+        if cpu >= 50 {
+            return .systemOrange
+        }
+        return .systemYellow
     }
     
     func setupWindow() {
@@ -153,11 +190,21 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pathLabel.frame = NSRect(x: 20, y: 112, width: windowWidth - 40, height: 24)
         pathLabel.alignment = .center
         contentView.addSubview(pathLabel)
+
+        let cpuValue = processCPUValue()
+        if let cpu = cpuValue {
+            let cpuLabel = NSTextField(labelWithString: String(format: "CPU %.1f%%", cpu))
+            cpuLabel.font = NSFont.boldSystemFont(ofSize: 24)
+            cpuLabel.textColor = cpuSeverityColor(cpu)
+            cpuLabel.frame = NSRect(x: 20, y: 82, width: windowWidth - 40, height: 30)
+            cpuLabel.alignment = .center
+            contentView.addSubview(cpuLabel)
+        }
         
         var infoText = ""
         if !detailText.isEmpty {
             if mode == "process" {
-                infoText = detailText
+                infoText = processDetailWithoutCPU()
             } else {
                 infoText = "Date info: " + detailText
             }
@@ -166,13 +213,13 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let dateLabel = NSTextField(labelWithString: infoText)
         dateLabel.font = NSFont.systemFont(ofSize: 10)
         dateLabel.textColor = .selectedControlColor
-        dateLabel.frame = NSRect(x: 20, y: 95, width: windowWidth - 40, height: 15)
+        dateLabel.frame = NSRect(x: 20, y: cpuValue == nil ? 95 : 68, width: windowWidth - 40, height: 15)
         dateLabel.alignment = .center
         contentView.addSubview(dateLabel)
         
         let helpLabel = NSTextField(labelWithString: "Press a number to act immediately:")
         helpLabel.font = NSFont.systemFont(ofSize: 12)
-        helpLabel.frame = NSRect(x: 20, y: 75, width: windowWidth - 40, height: 20)
+        helpLabel.frame = NSRect(x: 20, y: cpuValue == nil ? 75 : 50, width: windowWidth - 40, height: 20)
         helpLabel.alignment = .center
         contentView.addSubview(helpLabel)
         
@@ -182,29 +229,30 @@ class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let spacing: CGFloat = 5
         let totalWidth = (buttonWidth * 4) + (spacing * 3)
         let startX = (windowWidth - totalWidth) / 2
+        let buttonY: CGFloat = cpuValue == nil ? 50 : 16
         
         let action1 = "Keep"
         let btn1 = NSButton(title: "1. " + action1, target: self, action: #selector(onKeep))
-        btn1.frame = NSRect(x: startX, y: 50, width: buttonWidth, height: buttonHeight)
+        btn1.frame = NSRect(x: startX, y: buttonY, width: buttonWidth, height: buttonHeight)
         btn1.toolTip = tooltipFor(action: "KEEP")
         contentView.addSubview(btn1)
         
         let action2 = (mode == "process") ? "Kill" : "Delete"
         let btn2 = NSButton(title: "2. " + action2, target: self, action: #selector(onDelete))
-        btn2.frame = NSRect(x: startX + buttonWidth + spacing, y: 50, width: buttonWidth, height: buttonHeight)
+        btn2.frame = NSRect(x: startX + buttonWidth + spacing, y: buttonY, width: buttonWidth, height: buttonHeight)
         btn2.toolTip = tooltipFor(action: mode == "process" ? "KILL" : "DELETE")
         btn2.isEnabled = mode == "process" || deleteEnabled
         contentView.addSubview(btn2)
         
         let action3 = (mode == "process") ? "Investigate" : "Try"
         let btn3 = NSButton(title: "3. " + action3, target: self, action: #selector(onTry))
-        btn3.frame = NSRect(x: startX + (buttonWidth + spacing) * 2, y: 50, width: buttonWidth, height: buttonHeight)
+        btn3.frame = NSRect(x: startX + (buttonWidth + spacing) * 2, y: buttonY, width: buttonWidth, height: buttonHeight)
         btn3.toolTip = tooltipFor(action: mode == "process" ? "INVESTIGATE" : "TRY")
         contentView.addSubview(btn3)
         
         let action4 = "Skip"
         let btn4 = NSButton(title: "4. " + action4, target: self, action: #selector(onSkip))
-        btn4.frame = NSRect(x: startX + (buttonWidth + spacing) * 3, y: 50, width: buttonWidth, height: buttonHeight)
+        btn4.frame = NSRect(x: startX + (buttonWidth + spacing) * 3, y: buttonY, width: buttonWidth, height: buttonHeight)
         btn4.toolTip = tooltipFor(action: "SKIP")
         contentView.addSubview(btn4)
         
