@@ -235,7 +235,7 @@ def prompt_user(app_path, close_on_unfocus=True, last_used=""):
         if last_used:
             cmd.append(last_used)
         res = subprocess.check_output(cmd, text=True).strip()
-        for keyword in ["KEEP", "DELETE", "TRY", "SKIP", "QUIT"]:
+        for keyword in ["WHITELIST", "SNOOZE", "KEEP", "DELETE", "TRY", "SKIP", "QUIT"]:
             if keyword in res: return keyword
         return "QUIT"
     except:
@@ -783,7 +783,7 @@ def main():
                     save_json(WHITELIST_PATH, whitelist)
                     return
 
-                if action == "KEEP":
+                if action in {"KEEP", "WHITELIST"}:
                     record_keep(whitelist, item["path"])
                     current_queue = [i for i in current_queue if i["path"] != item["path"]]
                     processed += 1
@@ -806,7 +806,7 @@ def main():
                     save_json(QUEUE_PATH, current_queue)
                     processed += 1
                     time.sleep(1)
-                else:  # SKIP
+                else:  # SNOOZE/SKIP
                     for q_item in current_queue:
                         if q_item["path"] == item["path"]:
                             q_item["last_prompted"] = int(time.time())
