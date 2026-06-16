@@ -741,7 +741,7 @@ def main():
                 stale_dates[line] = "Unknown"
 
         max_prompts = min(int(config.get("max_prompts", DEFAULT_MAX_PROMPTS)), remaining_prompts)
-        close_on_unfocus = config.get("close_on_unfocus", True)
+        close_on_unfocus = False
 
         queue = load_json(QUEUE_PATH)
         if isinstance(queue, dict): queue = []  # Just in case it gets mangled
