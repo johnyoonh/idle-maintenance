@@ -398,7 +398,7 @@ def prompt_process(proc):
         upper = res.upper()
         if upper == "DELETE":
             return "KILL"
-        if upper in {"INVESTIGATE", "KILL", "KEEP", "TRY", "SKIP", "QUIT"}:
+        if upper in {"INVESTIGATE", "KILL", "KEEP", "SNOOZE", "TRY", "SKIP", "WHITELIST", "QUIT"}:
             return upper
         return "QUIT"
     except Exception as e:
@@ -562,7 +562,7 @@ def run_process_audit(config, prompt_budget=None):
             save_json(PROCESS_QUEUE_PATH, current_queue)
             save_json(PROCESS_WHITELIST_PATH, process_whitelist)
             return False, processed
-        if action == "KEEP":
+        if action in {"KEEP", "WHITELIST"}:
             record_keep(process_whitelist, item["comm"])
             current_queue = [i for i in current_queue if i.get("comm") != item["comm"]]
             processed += 1
@@ -604,7 +604,15 @@ def run_process_audit(config, prompt_budget=None):
             time.sleep(1)
             continue
 
-        # SKIP
+        # SNOOZE keeps the process in rotation but moves it behind older prompts.
+        if action == "SNOOZE":
+            for q_item in current_queue:
+                if q_item.get("comm") == item["comm"]:
+                    q_item["last_prompted"] = int(time.time())
+            processed += 1
+            continue
+
+        # Backward compatibility for older prompt.swift processes.
         record_keep(process_whitelist, item["comm"])
         current_queue = [i for i in current_queue if i.get("comm") != item["comm"]]
         processed += 1
