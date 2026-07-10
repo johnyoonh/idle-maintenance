@@ -24,8 +24,8 @@ brew cleanup -s && brew autoremove • Clean up Homebrew cache and old versions 
 The terminal suggestion list can include low-friction review prompts, not only cleanup commands. GUI shortcut review is intentionally wired here because opening a MacBook or a new terminal tab is already a context-switching moment:
 
 ```bash
-/Users/john/.local/bin/kb popup --surface gui --group obsidian-navigation --force
-/Users/john/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0
+$HOME/.local/bin/kb popup --surface gui --group auto --force
+$HOME/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0
 ```
 
 These stay out of the scheduled runner. The prompt asks first; the background job never opens GUI review windows or rewrites flashcard files.
@@ -64,13 +64,13 @@ launchctl print gui/$(id -u)/com.john.idle-maintenance
 That LaunchAgent calls:
 
 ```bash
-/Users/john/Applications/Wiki Automation.app/Contents/MacOS/wiki-automation idle-maintenance
+"$HOME/Applications/Wiki Automation.app/Contents/MacOS/wiki-automation" idle-maintenance
 ```
 
 Which dispatches to:
 
 ```bash
-~/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh
+"$WIKI_PATH/99_meta/scripts/idle_maintenance_runner.sh"
 ```
 
 The runner executes at most one due task per launchd tick. Before starting work, and while a task is running, it requires:
@@ -90,7 +90,7 @@ Current task policy:
 Check status:
 
 ```bash
-"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+"$WIKI_PATH/99_meta/scripts/idle_maintenance_runner.sh" --status
 ```
 
 Logs:
@@ -219,7 +219,7 @@ python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_
 swiftc -typecheck prompt.swift
 swiftc -typecheck app_usage_watcher.swift
 launchctl print gui/$(id -u)/com.john.idle-maintenance
-"$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/wiki/99_meta/scripts/idle_maintenance_runner.sh" --status
+"$WIKI_PATH/99_meta/scripts/idle_maintenance_runner.sh" --status
 tail -80 ~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
 ```
 

@@ -31,14 +31,14 @@ COMMON_COMMANDS = [
     {"cmd": "chezmoi update && chezmoi apply", "desc": "Update dotfiles from Bitwarden", "freq": 24},
     {
         "id": "kb-gui-review",
-        "cmd": "/Users/john/.local/bin/kb popup --surface gui --group obsidian-navigation --force",
-        "desc": "Review Obsidian navigation shortcuts while you are already in context-switching mode",
+        "cmd": "$HOME/.local/bin/kb popup --surface gui --group auto --force",
+        "desc": "Review a varied daily-work shortcut set while you are already changing context",
         "freq": 24,
         "protected": True,
     },
     {
         "id": "kb-srs-focused",
-        "cmd": "/Users/john/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
+        "cmd": "$HOME/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
         "desc": "Refresh focused shortcut flashcards for Obsidian SRS",
         "freq": 168,
         "protected": True,

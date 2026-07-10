@@ -468,7 +468,7 @@ final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
             executable: "/bin/zsh",
             arguments: [
                 "-lc",
-                "/Users/john/.local/bin/kb popup --surface gui --group obsidian-navigation --force"
+                "$HOME/.local/bin/kb popup --surface gui --group auto --force"
             ]
         )
     }
