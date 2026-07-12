@@ -86,6 +86,23 @@ Current task policy:
 - yadm auto-push: weekly, at least 300s idle, load <= 2.0.
 - Log pruning: daily, no idle minimum, load <= 4.0.
 - App cleanup review: weekly, at least 600s idle, load <= 1.5.
+- Storage cleanup: daily, at least 600s idle, load <= 1.5. It prunes aged
+  caches/logs/Trash and Xcode artifacts, removes the disposable Screenpipe
+  store, and invokes supported package-manager cleanup commands.
+
+Preview storage cleanup without changing files:
+
+```bash
+python3 ~/repos/idle-maintenance/storage_cleanup.py --dry-run
+```
+
+Each run writes a JSON report to
+`~/Library/Logs/idle-maintenance/storage-cleanup.jsonl`. Policy is configured
+under `storage_cleanup` in the normal idle-maintenance config, including
+retention periods, minimum free space, Screenpipe deletion, and package
+cleaner toggles. `protected_paths` are never traversed or deleted; defaults
+explicitly protect aisess, its prompt index and mirrors, agent-blame state,
+provider session stores, and the Codex/OpenCode databases.
 
 Check status:
 

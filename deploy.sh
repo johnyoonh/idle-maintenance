@@ -14,6 +14,7 @@ cp idle_config.py "$DEST/"
 cp idle_watcher.py "$DEST/"
 cp maintenance_interactive.py "$DEST/"
 cp prompt.swift "$DEST/"
+cp storage_cleanup.py "$DEST/"
 
 # 2. Copy data/config files ONLY if they don't exist (preserve user settings/state)
 cp -n config.json "$DEST/" 2>/dev/null
