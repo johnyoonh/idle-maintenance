@@ -5,7 +5,14 @@ import json
 import time
 import sys
 import shlex
-from idle_config import APP_SUPPORT_DIR, DEFAULT_CONFIG, load_config
+from idle_config import (
+    APP_SUPPORT_DIR,
+    DEFAULT_CONFIG,
+    keep_entry_is_active,
+    load_config,
+    next_keep_delay_days,
+    parse_keep_entry,
+)
 from restore_sources import app_metadata, classify_app_restore_source
 
 LOCK_FILE = "/tmp/idle_maintenance.lock"
@@ -82,21 +89,6 @@ def load_custom_whitelist(path):
         except: pass
     return {}
 
-def parse_keep_entry(value):
-    if isinstance(value, dict):
-        kept_at = value.get("kept_at", value.get("timestamp"))
-        keep_count = value.get("keep_count", 1)
-        try:
-            kept_at = float(kept_at)
-            keep_count = max(1, int(keep_count))
-            return {"kept_at": kept_at, "keep_count": keep_count}
-        except (TypeError, ValueError):
-            return None
-    try:
-        return {"kept_at": float(value), "keep_count": 1}
-    except (TypeError, ValueError):
-        return None
-
 def record_keep(whitelist, key):
     previous = parse_keep_entry(whitelist.get(key))
     keep_count = 1
@@ -107,23 +99,12 @@ def record_keep(whitelist, key):
         "keep_count": keep_count
     }
 
-def get_keep_delay_days(config, keep_count, prefix=""):
-    base_key = f"{prefix}keep_days_limit"
-    multiplier_key = f"{prefix}keep_backoff_multiplier"
-    max_key = f"{prefix}keep_backoff_max_days"
-    base_days = max(0.0, float(config.get(base_key, 1)))
-    multiplier = max(1.0, float(config.get(multiplier_key, 2.0)))
-    max_days = max(base_days, float(config.get(max_key, 30)))
-    delay = base_days * (multiplier ** max(0, keep_count - 1))
-    return min(delay, max_days)
-
-def keep_entry_is_active(config, entry, prefix=""):
-    keep_entry = parse_keep_entry(entry)
-    if not keep_entry:
+def queue_item_is_snoozed(item, snooze_hours, now=None):
+    last_prompted = float(item.get("last_prompted", 0) or 0)
+    if last_prompted <= 0:
         return False
-    keep_delay_days = get_keep_delay_days(config, keep_entry["keep_count"], prefix)
-    time_since_keep = (time.time() - keep_entry["kept_at"]) / 86400.0
-    return time_since_keep <= keep_delay_days
+    current_time = time.time() if now is None else float(now)
+    return current_time - last_prompted < max(0.0, float(snooze_hours)) * 3600
 
 def save_json(path, data):
     ensure_state_dir()
@@ -159,6 +140,26 @@ def get_restore_source(config, app_path):
     if not isinstance(providers, list):
         providers = []
     return classify_app_restore_source(app_path, providers)
+
+def app_usage_detail(last_used, stale_days_limit):
+    value = (last_used or "Unknown").strip()
+    if value == "Unknown":
+        return (
+            f"Last used: unknown • surfaced because the stale threshold is "
+            f"{stale_days_limit} days"
+        )
+
+    date_text = value[:10]
+    source = "observed usage" if "(observed)" in value else "Spotlight metadata"
+    try:
+        used_at = time.mktime(time.strptime(date_text, "%Y-%m-%d"))
+        days_ago = max(0, int((time.time() - used_at) / 86400))
+        return (
+            f"Last used: {date_text} ({days_ago} days ago, {source}) • "
+            f"stale threshold: {stale_days_limit} days"
+        )
+    except ValueError:
+        return f"Last used: {value} • stale threshold: {stale_days_limit} days"
 
 def run_delete_hooks(hook_paths, payload):
     for hook_path in hook_paths or []:
@@ -227,13 +228,15 @@ end run
     log(f"Admin move failed to trash {app_path}: {details}")
     return False
 
-def prompt_user(app_path, close_on_unfocus=True, last_used=""):
+def prompt_user(app_path, close_on_unfocus=True, detail="", snooze_hours=720, keep_days=60):
     app_name = os.path.basename(app_path)
     swift_script = os.path.join(BASE_DIR, "prompt.swift")
     try:
-        cmd = ["swift", swift_script, app_name, app_path, str(close_on_unfocus).lower()]
-        if last_used:
-            cmd.append(last_used)
+        cmd = [
+            "swift", swift_script, app_name, app_path,
+            str(close_on_unfocus).lower(), "app", detail,
+            str(snooze_hours), str(keep_days),
+        ]
         res = subprocess.check_output(cmd, text=True).strip()
         for keyword in ["WHITELIST", "SNOOZE", "KEEP", "DELETE", "TRY", "SKIP", "QUIT"]:
             if keyword in res: return keyword
@@ -261,10 +264,7 @@ def parse_etime_seconds(etime):
         return 0
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
-def get_candidate_processes(config):
-    high_cpu_threshold = float(config.get("process_high_cpu_threshold", 50.0))
-    long_running_hours = int(config.get("process_long_running_hours", 24))
-    long_running_min_cpu = float(config.get("process_long_running_min_cpu", 10.0))
+def get_process_snapshot(config):
     ignored = set(config.get("process_ignore_commands", []))
     current_user = os.getenv("USER", "")
 
@@ -275,10 +275,9 @@ def get_candidate_processes(config):
         ).splitlines()
     except Exception as e:
         log(f"Failed to collect process list: {e}")
-        return []
+        return {}
 
-    candidates_by_comm = {}
-    min_long_seconds = long_running_hours * 3600
+    snapshot = {}
 
     for line in output[1:]:
         parts = line.strip().split(None, 5)
@@ -299,12 +298,7 @@ def get_candidate_processes(config):
         if comm in ignored:
             continue
 
-        high_cpu = cpu >= high_cpu_threshold
-        long_running = elapsed >= min_long_seconds and cpu >= long_running_min_cpu
-        if not (high_cpu or long_running):
-            continue
-
-        entry = {
+        snapshot[pid] = {
             "pid": pid,
             "user": user,
             "cpu": cpu,
@@ -313,9 +307,62 @@ def get_candidate_processes(config):
             "comm": comm,
             "command": command
         }
-        existing = candidates_by_comm.get(comm)
-        if not existing or cpu > existing["cpu"]:
-            candidates_by_comm[comm] = entry
+
+    return snapshot
+
+def get_candidate_processes(config, snapshot_provider=None, sleep_fn=time.sleep):
+    high_cpu_threshold = float(config.get("process_high_cpu_threshold", 50.0))
+    long_running_hours = int(config.get("process_long_running_hours", 24))
+    long_running_min_cpu = float(config.get("process_long_running_min_cpu", 10.0))
+    sample_count = max(1, int(config.get("process_cpu_sample_count", 3)))
+    sample_interval = max(0.0, float(config.get("process_cpu_sample_interval_seconds", 30)))
+    min_long_seconds = long_running_hours * 3600
+    provider = snapshot_provider or (lambda: get_process_snapshot(config))
+
+    first = provider()
+    high_pids = {
+        pid for pid, proc in first.items()
+        if proc["cpu"] >= high_cpu_threshold
+    }
+    samples = [first]
+    for _ in range(1, sample_count):
+        if not high_pids:
+            break
+        sleep_fn(sample_interval)
+        current = provider()
+        samples.append(current)
+        high_pids = {
+            pid for pid in high_pids
+            if pid in current and current[pid]["cpu"] >= high_cpu_threshold
+        }
+
+    candidates_by_comm = {}
+    long_running_pids = {
+        pid for pid, proc in first.items()
+        if proc["elapsed_seconds"] >= min_long_seconds
+        and proc["cpu"] >= long_running_min_cpu
+    }
+    eligible_pids = long_running_pids | high_pids
+    latest = samples[-1]
+    for pid in eligible_pids:
+        proc = dict(latest.get(pid) or first[pid])
+        cpu_samples = [sample[pid]["cpu"] for sample in samples if pid in sample]
+        reasons = []
+        if pid in high_pids and len(cpu_samples) == sample_count:
+            reasons.append(
+                f"CPU stayed at or above {high_cpu_threshold:.1f}% for "
+                f"{sample_count} samples over {sample_interval * (sample_count - 1):.0f}s"
+            )
+        if pid in long_running_pids:
+            reasons.append(
+                f"Running {proc['etime']} (limit {long_running_hours}h) with "
+                f"CPU at or above {long_running_min_cpu:.1f}%"
+            )
+        proc["cpu_samples"] = cpu_samples
+        proc["reason"] = " • ".join(reasons)
+        existing = candidates_by_comm.get(proc["comm"])
+        if not existing or proc["cpu"] > existing["cpu"]:
+            candidates_by_comm[proc["comm"]] = proc
 
     candidates = list(candidates_by_comm.values())
     candidates.sort(key=lambda p: (-p["cpu"], -p["elapsed_seconds"]))
@@ -368,14 +415,19 @@ def get_fileprovider_offender_summary(pid):
     parts = [f"{name} {((count / total) * 100):.0f}%" for name, count in top]
     return "Providers: " + " • ".join(parts)
 
-def prompt_process(proc):
+def prompt_process(proc, snooze_hours=24, keep_days=1):
     command = (proc.get("command") or "").strip()
     cmd_token = (command.split() or [proc["comm"]])[0]
     process_name = os.path.basename(cmd_token) or os.path.basename(proc["comm"]) or proc["comm"]
     display_name = process_name
     if command and command != process_name:
         display_name = f"{process_name} ({command})"
-    detail = f"PID {proc['pid']} • CPU {proc['cpu']:.1f}% • Elapsed {proc['etime']}"
+    samples = proc.get("cpu_samples") or [proc["cpu"]]
+    sample_text = ", ".join(f"{value:.1f}%" for value in samples)
+    detail = (
+        f"PID {proc['pid']} • CPU samples: {sample_text} • Elapsed {proc['etime']}"
+        f"\nReason: {proc.get('reason', 'Matched the configured process policy')}"
+    )
     if process_name == "fileproviderd":
         offender_summary = get_fileprovider_offender_summary(proc["pid"])
         if offender_summary:
@@ -390,8 +442,10 @@ def prompt_process(proc):
                 display_name,
                 display_path,
                 "false",
-                "__MODE__=process",
-                detail
+                "process",
+                detail,
+                str(snooze_hours),
+                str(keep_days),
             ],
             text=True
         ).strip()
@@ -534,6 +588,7 @@ def run_process_audit(config, prompt_budget=None):
     if isinstance(process_queue, dict):
         process_queue = []
     process_whitelist = load_custom_whitelist(PROCESS_WHITELIST_PATH)
+    snooze_hours = max(0.0, float(config.get("process_snooze_hours", 24)))
 
     candidates = get_candidate_processes(config)
     candidate_by_comm = {p["comm"]: p for p in candidates}
@@ -556,8 +611,13 @@ def run_process_audit(config, prompt_budget=None):
         proc = candidate_by_comm.get(item["comm"])
         if not proc:
             continue
+        if queue_item_is_snoozed(item, snooze_hours):
+            continue
 
-        action = prompt_process(proc)
+        keep_days = next_keep_delay_days(
+            config, process_whitelist.get(item["comm"]), "process_"
+        )
+        action = prompt_process(proc, snooze_hours=snooze_hours, keep_days=keep_days)
         if action == "QUIT":
             save_json(PROCESS_QUEUE_PATH, current_queue)
             save_json(PROCESS_WHITELIST_PATH, process_whitelist)
@@ -571,10 +631,18 @@ def run_process_audit(config, prompt_budget=None):
             success = kill_process(proc["pid"])
             if success:
                 current_queue = [i for i in current_queue if i.get("comm") != item["comm"]]
+                notify_user(
+                    "Idle Maintenance",
+                    f"Stopped {proc['comm']} (PID {proc['pid']}).",
+                )
             else:
                 for q_item in current_queue:
                     if q_item.get("comm") == item["comm"]:
                         q_item["last_prompted"] = int(time.time())
+                notify_user(
+                    "Idle Maintenance",
+                    f"Could not stop {proc['comm']} (PID {proc['pid']}). See IdleMaintenance.log.",
+                )
             processed += 1
             continue
         if action == "INVESTIGATE":
@@ -742,6 +810,8 @@ def main():
 
         max_prompts = min(int(config.get("max_prompts", DEFAULT_MAX_PROMPTS)), remaining_prompts)
         close_on_unfocus = False
+        app_snooze_hours = max(0.0, float(config.get("app_snooze_hours", 720)))
+        stale_days_limit = int(config.get("stale_days_limit", 90))
 
         queue = load_json(QUEUE_PATH)
         if isinstance(queue, dict): queue = []  # Just in case it gets mangled
@@ -761,10 +831,14 @@ def main():
         for item in queue:
             if processed >= max_prompts:
                 break
+            if queue_item_is_snoozed(item, app_snooze_hours):
+                continue
 
             app_done = False
             while not app_done and processed < max_prompts:
-                last_used_info = stale_dates.get(item["path"], "Unknown")
+                last_used_info = app_usage_detail(
+                    stale_dates.get(item["path"], "Unknown"), stale_days_limit
+                )
                 restore_source = get_restore_source(config, item["path"])
                 cleanup, _ = app_cleanup_config(config)
                 allow_unknown_restore = bool(cleanup.get("allow_unknown_restore_source", False))
@@ -776,7 +850,11 @@ def main():
                     last_used_info += f" • Restore: {restore_source.get('restore_command', restore_source.get('source'))}"
                 if item.get("last_prompted", 0) > 0:
                     last_used_info += f" (Last prompted/tried: {time.strftime('%Y-%m-%d', time.localtime(item['last_prompted']))})"
-                action = prompt_user(item["path"], close_on_unfocus, last_used_info)
+                keep_days = next_keep_delay_days(config, whitelist.get(item["path"]))
+                action = prompt_user(
+                    item["path"], close_on_unfocus, last_used_info,
+                    snooze_hours=app_snooze_hours, keep_days=keep_days,
+                )
 
                 if action == "QUIT":
                     save_json(QUEUE_PATH, current_queue)
@@ -792,6 +870,12 @@ def main():
                     success = delete_app(item["path"], config)
                     if success:
                         current_queue = [i for i in current_queue if i["path"] != item["path"]]
+                        restore_command = restore_source.get("restore_command", "")
+                        restore_note = f" Restore with: {restore_command}" if restore_command else ""
+                        notify_user(
+                            "Idle Maintenance",
+                            f"Moved {os.path.basename(item['path'])} to Trash.{restore_note}",
+                        )
                     else:
                         for q_item in current_queue:
                             if q_item["path"] == item["path"]:
@@ -805,7 +889,7 @@ def main():
                             q_item["last_prompted"] = int(time.time())
                     save_json(QUEUE_PATH, current_queue)
                     processed += 1
-                    time.sleep(1)
+                    app_done = True
                 else:  # SNOOZE/SKIP
                     for q_item in current_queue:
                         if q_item["path"] == item["path"]:

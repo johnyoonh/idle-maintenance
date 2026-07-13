@@ -2,7 +2,14 @@
 import subprocess
 import os
 from datetime import datetime
-from idle_config import APP_SUPPORT_DIR, get_handoff_app, load_config, read_json_file
+from idle_config import (
+    APP_SUPPORT_DIR,
+    get_handoff_app,
+    get_keep_delay_days,
+    load_config,
+    parse_keep_entry,
+    read_json_file,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = APP_SUPPORT_DIR
@@ -28,28 +35,6 @@ def load_custom_whitelist():
         if isinstance(data, dict):
             return data
     return {}
-
-def parse_keep_entry(value):
-    if isinstance(value, dict):
-        kept_at = value.get("kept_at", value.get("timestamp"))
-        keep_count = value.get("keep_count", 1)
-        try:
-            kept_at = float(kept_at)
-            keep_count = max(1, int(keep_count))
-            return {"kept_at": kept_at, "keep_count": keep_count}
-        except (TypeError, ValueError):
-            return None
-    try:
-        return {"kept_at": float(value), "keep_count": 1}
-    except (TypeError, ValueError):
-        return None
-
-def get_keep_delay_days(config, keep_count):
-    base_days = max(1.0, float(config.get("keep_days_limit", 60)))
-    multiplier = max(1.0, float(config.get("keep_backoff_multiplier", 2.0)))
-    max_days = max(base_days, float(config.get("keep_backoff_max_days", 365)))
-    delay = base_days * (multiplier ** max(0, keep_count - 1))
-    return min(delay, max_days)
 
 def normalize_app_path(path):
     return os.path.realpath(os.path.abspath(path))

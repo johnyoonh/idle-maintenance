@@ -13,6 +13,7 @@ cp app_auditor.py "$DEST/"
 cp idle_config.py "$DEST/"
 cp idle_watcher.py "$DEST/"
 cp maintenance_interactive.py "$DEST/"
+cp maintenance_status.py "$DEST/"
 cp prompt.swift "$DEST/"
 cp storage_cleanup.py "$DEST/"
 

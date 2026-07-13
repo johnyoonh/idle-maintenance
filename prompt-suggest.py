@@ -10,7 +10,8 @@ import time
 import random
 import stat
 import subprocess
-from datetime import datetime
+
+from idle_config import is_terminal_suggestion_time, load_config
 
 STATE_PATH = os.path.expanduser("~/Library/Application Support/idle-maintenance/state.json")
 CACHE_PATH = os.path.expanduser("~/Library/Application Support/idle-maintenance/cache.json")
@@ -327,6 +328,9 @@ def get_session_suggestion():
 
 def get_suggestion():
     """Get a maintenance suggestion (once per shell session)"""
+    if not is_terminal_suggestion_time(load_config(os.path.dirname(__file__))):
+        return None
+
     # Check if this session already showed a suggestion
     if has_session_shown():
         return get_session_suggestion()
@@ -338,18 +342,14 @@ def get_suggestion():
     if not suggestions:
         return None
 
-    now = datetime.now()
-    current_hour = now.hour
-
-    # Only show during work hours (9am-8pm)
-    if current_hour < 9 or current_hour > 20:
-        return None
-
     # Filter suggestions that are due (already sorted by mtime DESC - LIFO stack)
     # We'll pick the FIRST matching suggestion (newest)
     for sug in suggestions:
         script_id = sug["script"]
         frequency_hours = sug.get("frequency_hours", 168)
+
+        if script_id in state.get("disabled", {}):
+            continue
 
         # Skip if dismissed recently
         dismissed_ts = state.get("dismissed", {}).get(script_id, 0)
@@ -375,7 +375,7 @@ def format_suggestion(sug):
     cmd = sug["command"]
 
     # Single line - command first in bold gold, then description
-    output = f"\n{BOLD}{GOLD}{cmd}{RESET} {DIM}•{RESET} {WHITE}{desc}{RESET} {DIM}|{RESET} {GREEN}1=Run{RESET} {RED}2=Del{RESET} {YELLOW}3=Try{RESET} {MAGENTA}4=Skip{RESET}\n"
+    output = f"\n{BOLD}{GOLD}{cmd}{RESET} {DIM}•{RESET} {WHITE}{desc}{RESET} {DIM}|{RESET} {GREEN}R=Run{RESET} {RED}D=Dismiss{RESET} {YELLOW}P=Preview{RESET} {MAGENTA}L=Later{RESET}\n"
 
     return output
 

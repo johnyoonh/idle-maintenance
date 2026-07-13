@@ -1,5 +1,7 @@
 import json
 import os
+import time
+from datetime import datetime
 
 APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/idle-maintenance")
 XDG_CONFIG_DIR = os.path.expanduser("~/.config/idle-watcher")
@@ -31,6 +33,13 @@ DEFAULT_CONFIG = {
     "process_keep_days_limit": 1,
     "process_keep_backoff_multiplier": 2.0,
     "process_keep_backoff_max_days": 30,
+    "process_snooze_hours": 24,
+    "process_cpu_sample_count": 3,
+    "process_cpu_sample_interval_seconds": 30,
+    "app_snooze_hours": 720,
+    "terminal_suggestion_start_hour": 9,
+    "terminal_suggestion_end_hour": 21,
+    "scheduled_runner_status_command": [],
     "return_from_away_minutes": 15,
     "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",
     "return_flashcard_refresh_command": f"{LOCAL_BIN_DIR}/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
@@ -138,3 +147,55 @@ def get_shortcut_review_command(config):
     if config.get("show_shortcuts_on_finish", True):
         return config.get("shortcut_review_command") or DEFAULT_CONFIG["shortcut_review_command"]
     return ""
+
+def parse_keep_entry(value):
+    if isinstance(value, dict):
+        kept_at = value.get("kept_at", value.get("timestamp"))
+        keep_count = value.get("keep_count", 1)
+        try:
+            return {
+                "kept_at": float(kept_at),
+                "keep_count": max(1, int(keep_count)),
+            }
+        except (TypeError, ValueError):
+            return None
+    try:
+        return {"kept_at": float(value), "keep_count": 1}
+    except (TypeError, ValueError):
+        return None
+
+def get_keep_delay_days(config, keep_count, prefix=""):
+    base_days = max(0.0, float(config.get(f"{prefix}keep_days_limit", 1)))
+    multiplier = max(1.0, float(config.get(f"{prefix}keep_backoff_multiplier", 2.0)))
+    max_days = max(base_days, float(config.get(f"{prefix}keep_backoff_max_days", 30)))
+    delay = base_days * (multiplier ** max(0, keep_count - 1))
+    return min(delay, max_days)
+
+def keep_entry_is_active(config, entry, prefix="", now=None):
+    keep_entry = parse_keep_entry(entry)
+    if not keep_entry:
+        return False
+    current_time = time.time() if now is None else float(now)
+    keep_delay_days = get_keep_delay_days(config, keep_entry["keep_count"], prefix)
+    return current_time - keep_entry["kept_at"] <= keep_delay_days * 86400
+
+def next_keep_delay_days(config, entry, prefix=""):
+    keep_entry = parse_keep_entry(entry)
+    next_count = 1 if not keep_entry else keep_entry["keep_count"] + 1
+    return get_keep_delay_days(config, next_count, prefix)
+
+def is_terminal_suggestion_time(config, now=None):
+    current_hour = (now or datetime.now()).hour
+    try:
+        start = int(config.get("terminal_suggestion_start_hour", 9))
+        end = int(config.get("terminal_suggestion_end_hour", 21))
+        if not 0 <= start <= 23 or not 0 <= end <= 23:
+            raise ValueError
+    except (TypeError, ValueError):
+        start, end = 9, 21
+
+    if start == end:
+        return True
+    if start < end:
+        return start <= current_hour < end
+    return current_hour >= start or current_hour < end

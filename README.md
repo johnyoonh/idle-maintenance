@@ -18,7 +18,7 @@ When a new terminal tab opens during work hours, `~/.zshrc` calls:
 Display format:
 
 ```bash
-brew cleanup -s && brew autoremove • Clean up Homebrew cache and old versions | 1=Run 2=Del 3=Try 4=Skip
+brew cleanup -s && brew autoremove • Clean up Homebrew cache and old versions | R=Run D=Dismiss P=Preview L=Later
 ```
 
 The terminal suggestion list can include low-friction review prompts, not only cleanup commands. GUI shortcut review is intentionally wired here because opening a MacBook or a new terminal tab is already a context-switching moment:
@@ -30,14 +30,30 @@ $HOME/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused
 
 These stay out of the scheduled runner. The prompt asks first; the background job never opens GUI review windows or rewrites flashcard files.
 
-Quick actions are handled by aliases in `~/.zshrc`:
+Quick actions are handled by functions in `~/.zshrc`:
 
 ```bash
-1     # Run it
-2     # Dismiss/delete it
-3     # Try/preview it
-4     # Skip it for now
+R     # Run it
+D     # Dismiss it until explicitly re-enabled
+P     # Preview it before running
+L     # Defer it for its normal frequency
 ```
+
+The canonical CLI uses action-first commands:
+
+```bash
+maint run [script-id]
+maint dismiss [script-id]
+maint preview [script-id]
+maint later [script-id]
+maint enable <script-id>
+maint list --all
+maint status
+```
+
+Dismiss only changes suggestion state; it never deletes the underlying executable.
+The older `maint <script-id> <1-4>` forms remain temporarily available with a
+deprecation warning.
 
 State lives in:
 
@@ -51,7 +67,9 @@ Important files:
 - `state.json`: run/dismiss history.
 - `cache.json`: discovered command cache.
 
-Suggestions are intentionally silent outside 9am-8pm.
+Suggestions default to 9am–9pm with an exclusive end boundary. Override
+`terminal_suggestion_start_hour` and `terminal_suggestion_end_hour` in the normal
+config; an overnight range is supported and equal values mean always available.
 
 ## Scheduled Runner
 
@@ -107,8 +125,14 @@ provider session stores, and the Codex/OpenCode databases.
 Check status:
 
 ```bash
-"$WIKI_PATH/99_meta/scripts/idle_maintenance_runner.sh" --status
+maint status
+maint status --json
 ```
+
+The menu-bar app exposes the same data under **Maintenance Status…**. It reports
+launchd health, authoritative runner output, the latest event, interactive
+queues, snoozes/backoff, and terminal availability. It discovers the runner
+through `scheduled_runner_status_command`, `$WIKI_PATH`, or `$HOME/wiki`.
 
 Logs:
 
@@ -203,7 +227,7 @@ These files are retained for manual/legacy use:
 - `deploy.sh`
 - `com.user.idle_maintenance.plist`
 
-They are not the normal background maintenance path. `com.user.idle_maintenance.plist` is kept as a disabled legacy sample only.
+They are not the normal background maintenance path. `com.user.idle_maintenance.plist` is kept as a disabled legacy sample only. Opening the menu-bar app does not start the legacy watcher; use **Start / Restart Legacy Watcher** explicitly when needed.
 
 The legacy watcher reads configuration from the first available file in this order:
 
@@ -222,7 +246,13 @@ If unset, the handoff app defaults to Apple Reminders. Example runtime config:
   "check_interval_seconds": 30,
   "post_trigger_cooldown_seconds": 3600,
   "max_entries_per_idle_return": 5,
+  "app_snooze_hours": 720,
   "process_high_cpu_threshold": 50.0,
+  "process_cpu_sample_count": 3,
+  "process_cpu_sample_interval_seconds": 30,
+  "process_snooze_hours": 24,
+  "terminal_suggestion_start_hour": 9,
+  "terminal_suggestion_end_hour": 21,
   "stale_days_limit": 90
 }
 ```
@@ -232,11 +262,12 @@ If unset, the handoff app defaults to Apple Reminders. Example runtime config:
 Recommended checks:
 
 ```bash
-python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_interactive.py prompt-suggest.py
+python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_interactive.py maintenance_status.py maint.py prompt-suggest.py
+python3 -m unittest discover -s tests -v
 swiftc -typecheck prompt.swift
 swiftc -typecheck app_usage_watcher.swift
 launchctl print gui/$(id -u)/com.john.idle-maintenance
-"$WIKI_PATH/99_meta/scripts/idle_maintenance_runner.sh" --status
+maint status
 tail -80 ~/Library/Logs/wiki-automation/idle-maintenance-runtime.log
 ```
 

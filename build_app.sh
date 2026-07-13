@@ -21,6 +21,7 @@ trap 'rm -f "$TMP_SWIFT"' EXIT
 cat > "$TMP_SWIFT" <<'EOF'
 import AppKit
 import Foundation
+import Dispatch
 
 struct WatchJobsFile: Decodable {
     let jobs: [String: WatchJob]
@@ -343,6 +344,8 @@ func runHealthCheck(name: String) throws {
 final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var watcher: Process?
+    var statusWindow: NSWindow?
+    var statusTextView: NSTextView?
 
     let logsDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs")
@@ -358,7 +361,6 @@ final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
-        startWatcherIfNeeded()
     }
 
     func setupStatusItem() {
@@ -367,19 +369,100 @@ final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "Idle Maintenance"
 
         let menu = NSMenu(title: "Idle Maintenance")
-        menu.addItem(withTitle: "Idle Maintenance Running", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Maintenance Status…", action: #selector(showMaintenanceStatus), keyEquivalent: "s")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Review High CPU Apps", action: #selector(reviewHighCpuApps), keyEquivalent: "h")
+        menu.addItem(withTitle: "Review Sustained High CPU (1 min)", action: #selector(reviewHighCpuApps), keyEquivalent: "h")
         menu.addItem(withTitle: "Review Keyboard Shortcuts", action: #selector(reviewKeyboardShortcuts), keyEquivalent: "k")
         menu.addItem(withTitle: "Run Next Maintenance Prompt", action: #selector(runMaintenanceReview), keyEquivalent: "m")
         menu.addItem(withTitle: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Restart Watcher", action: #selector(restartWatcher), keyEquivalent: "r")
+        menu.addItem(withTitle: "Start / Restart Legacy Watcher", action: #selector(restartWatcher), keyEquivalent: "r")
         menu.addItem(withTitle: "Open Logs", action: #selector(openLogs), keyEquivalent: "l")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
         item.menu = menu
         statusItem = item
+    }
+
+    func makeStatusWindow() -> NSWindow {
+        if let existing = statusWindow {
+            return existing
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Idle Maintenance Status"
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = content
+
+        let scroll = NSScrollView(frame: NSRect(x: 20, y: 60, width: 720, height: 480))
+        scroll.hasVerticalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+        scroll.documentView = textView
+        content.addSubview(scroll)
+
+        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshMaintenanceStatus))
+        refresh.frame = NSRect(x: 20, y: 16, width: 100, height: 32)
+        content.addSubview(refresh)
+
+        let logs = NSButton(title: "Open Logs", target: self, action: #selector(openLogs))
+        logs.frame = NSRect(x: 130, y: 16, width: 100, height: 32)
+        content.addSubview(logs)
+
+        statusWindow = window
+        statusTextView = textView
+        return window
+    }
+
+    @objc func showMaintenanceStatus() {
+        let window = makeStatusWindow()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        refreshMaintenanceStatus()
+    }
+
+    @objc func refreshMaintenanceStatus() {
+        statusTextView?.string = "Loading maintenance status…"
+        let statusScript = maintenanceDir.appendingPathComponent("maintenance_status.py").path
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            let output = Pipe()
+            let errors = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = [statusScript]
+            process.standardOutput = output
+            process.standardError = errors
+
+            var text = ""
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+                text = String(data: data, encoding: .utf8) ?? ""
+                if text.isEmpty {
+                    text = String(data: errorData, encoding: .utf8) ?? "Status command produced no output."
+                }
+            } catch {
+                text = "Unable to load maintenance status: \(error)"
+            }
+
+            DispatchQueue.main.async {
+                self.statusTextView?.string = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
     }
 
     func startWatcherIfNeeded() {
@@ -563,6 +646,7 @@ cp "$SRC_DIR/app_auditor.py" "$RES_DIR/"
 cp "$SRC_DIR/idle_config.py" "$RES_DIR/"
 cp "$SRC_DIR/idle_watcher.py" "$RES_DIR/"
 cp "$SRC_DIR/maintenance_interactive.py" "$RES_DIR/"
+cp "$SRC_DIR/maintenance_status.py" "$RES_DIR/"
 cp "$SRC_DIR/prompt.swift" "$RES_DIR/"
 cp "$SRC_DIR/restore_sources.py" "$RES_DIR/"
 cp "$SRC_DIR/app_usage_watcher.swift" "$RES_DIR/"
