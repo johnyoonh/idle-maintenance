@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - agent/io-aware-process-maintenance
+      - main
     paths:
       - .github/workflows/apply-resource-patch.yml
 
