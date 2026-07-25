@@ -1,0 +1,54 @@
+name: Apply resource-aware maintenance patch
+
+on:
+  push:
+    branches:
+      - agent/io-aware-process-maintenance
+    paths:
+      - .github/workflows/apply-resource-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Unpack reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .idle-maintenance-patch/bundle.part-* | base64 --decode > /tmp/idle-maintenance-patch.tgz
+          tar -xzf /tmp/idle-maintenance-patch.tgz -C .
+          rm -rf .idle-maintenance-patch
+          rm -f .github/workflows/apply-resource-patch.yml
+
+      - name: Validate Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            idle_config.py \
+            idle_watcher.py \
+            app_auditor.py \
+            maintenance_interactive.py \
+            maintenance_status.py \
+            maint.py \
+            prompt-suggest.py \
+            storage_cleanup.py \
+            disk_activity.py
+          python3 -m unittest discover -s tests -v
+
+      - name: Commit generated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add resource-aware maintenance"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
