@@ -341,6 +341,153 @@ func runHealthCheck(name: String) throws {
     try writeString(String(Int(now)), to: statePath)
 }
 
+func appendSmartCaffeinateLog(_ message: String) {
+    let logURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/smart_caffeinate/activity.log")
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    let line = "\(formatter.string(from: Date())) - \(message)\n"
+
+    do {
+        try FileManager.default.createDirectory(
+            at: logURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(line.utf8))
+        try handle.close()
+    } catch {
+        FileHandle.standardError.write(Data("Smart caffeinate log failed: \(error)\n".utf8))
+    }
+}
+
+func processOutput(executable: String, arguments: [String]) -> String {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = output
+    process.standardError = Pipe()
+
+    do {
+        try process.run()
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
+    } catch {
+        return ""
+    }
+}
+
+func regexMatches(_ regex: NSRegularExpression, _ text: String) -> Bool {
+    regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+}
+
+func activeDevelopmentProcess(
+    threshold: Double,
+    processRegex: NSRegularExpression,
+    excludeRegex: NSRegularExpression
+) -> (cpu: Double, command: String)? {
+    let output = processOutput(executable: "/bin/ps", arguments: ["-arcxo", "%cpu,command"])
+    var best: (cpu: Double, command: String)?
+
+    for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
+        let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard fields.count >= 2, let cpu = Double(fields[0]), cpu > threshold else {
+            continue
+        }
+        guard regexMatches(processRegex, line), !regexMatches(excludeRegex, line) else {
+            continue
+        }
+
+        let command = fields.dropFirst().joined(separator: " ")
+        if best == nil || cpu > best!.cpu {
+            best = (cpu: cpu, command: command)
+        }
+    }
+
+    return best
+}
+
+func startCaffeinate(duration: Int) -> Process? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+    process.arguments = ["-dimsu", "-t", String(duration)]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+
+    do {
+        try process.run()
+        return process
+    } catch {
+        appendSmartCaffeinateLog("Failed to start caffeinate: \(error)")
+        return nil
+    }
+}
+
+func runSmartCaffeinate() -> Never {
+    let processPattern = "Antigravity|Claude|Codex|Cursor|Gemini|gemini|claude|codex"
+    let excludePattern = "Helper|Renderer|GPU|Plugin|UIViewService|smart_caffeinate|caffeinate|Sparkle|Autoupdate|Updater|Usage4Claude"
+    let threshold = 8.5
+    let checkInterval: UInt32 = 30
+    let caffeinateDuration = 900
+    let processRegex = try! NSRegularExpression(pattern: processPattern, options: [.caseInsensitive])
+    let excludeRegex = try! NSRegularExpression(pattern: excludePattern, options: [.caseInsensitive])
+    var caffeinateProcess: Process?
+
+    func stopCaffeinate() {
+        if let process = caffeinateProcess, process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+        }
+        caffeinateProcess = nil
+    }
+
+    let signalQueue = DispatchQueue(label: "com.john.idlemaintenance.smart-caffeinate.signals")
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGINT, SIG_IGN)
+    let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalQueue)
+    let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
+    let stopHandler = {
+        appendSmartCaffeinateLog("Smart Caffeinate Service Stopped")
+        stopCaffeinate()
+        exit(0)
+    }
+    termSource.setEventHandler(handler: stopHandler)
+    intSource.setEventHandler(handler: stopHandler)
+    termSource.resume()
+    intSource.resume()
+
+    appendSmartCaffeinateLog(
+        "Smart Caffeinate Service Started via IdleMaintenance.app; watching: \(processPattern); excluding: \(excludePattern); threshold: \(threshold)% CPU; duration: \(caffeinateDuration)s"
+    )
+
+    while true {
+        if let active = activeDevelopmentProcess(
+            threshold: threshold,
+            processRegex: processRegex,
+            excludeRegex: excludeRegex
+        ) {
+            appendSmartCaffeinateLog(
+                String(
+                    format: "Activity detected: %@ at %.1f%% CPU. Extending caffeinate for %ds.",
+                    active.command,
+                    active.cpu,
+                    caffeinateDuration
+                )
+            )
+            stopCaffeinate()
+            caffeinateProcess = startCaffeinate(duration: caffeinateDuration)
+        }
+        sleep(checkInterval)
+    }
+}
+
 final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var watcher: Process?
@@ -577,6 +724,10 @@ final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
     @objc func quit() {
         NSApp.terminate(nil)
     }
+}
+
+if CommandLine.arguments.count >= 2 && CommandLine.arguments[1] == "run-smart-caffeinate" {
+    runSmartCaffeinate()
 }
 
 let app = NSApplication.shared

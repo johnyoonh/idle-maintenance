@@ -16,7 +16,9 @@ from idle_config import is_terminal_suggestion_time, load_config
 STATE_PATH = os.path.expanduser("~/Library/Application Support/idle-maintenance/state.json")
 CACHE_PATH = os.path.expanduser("~/Library/Application Support/idle-maintenance/cache.json")
 SESSION_PATH = os.path.expanduser("~/Library/Application Support/idle-maintenance/session.json")
+REFRESH_LOCK_PATH = os.path.expanduser("~/Library/Application Support/idle-maintenance/cache-refresh.lock")
 CACHE_TTL = 300  # 5 minutes cache TTL
+REFRESH_LOCK_TTL = 600  # 10 minutes
 
 # Script directories to scan
 SCRIPT_DIRS = [
@@ -96,6 +98,39 @@ def load_cached_scripts():
     cache = load_json(CACHE_PATH)
     return cache.get("scripts", [])
 
+def acquire_refresh_lock():
+    """Create a process marker so shell fan-out does not spawn duplicate refreshes."""
+    os.makedirs(os.path.dirname(REFRESH_LOCK_PATH), exist_ok=True)
+    try:
+        lock_age = time.time() - os.path.getmtime(REFRESH_LOCK_PATH)
+        if lock_age < REFRESH_LOCK_TTL:
+            return False
+        os.remove(REFRESH_LOCK_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+
+    try:
+        fd = os.open(REFRESH_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{os.getpid()} {time.time()}\n")
+    return True
+
+def release_refresh_lock():
+    """Remove this process marker after refresh completes."""
+    try:
+        os.remove(REFRESH_LOCK_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
 def is_executable(filepath):
     """Check if file is executable"""
     try:
@@ -169,43 +204,6 @@ def extract_description(filepath, filename):
     except:
         pass
 
-    # Second tier: Try --help flag (quick timeout)
-    if desc.startswith('Run '):
-        try:
-            result = subprocess.run(
-                [filepath, '--help'],
-                capture_output=True,
-                text=True,
-                timeout=0.5,  # Quick timeout
-                errors='ignore'
-            )
-            if result.returncode == 0 and result.stdout:
-                # Look for description lines in help output
-                lines = result.stdout.split('\n')
-
-                # First, try to find a description line (often after blank line)
-                for i, line in enumerate(lines[:20]):
-                    line = line.strip()
-                    # Skip empty, usage lines at the start, and option lists
-                    if not line or line.startswith('-') or line.startswith('Usage:'):
-                        continue
-                    # Look for description patterns
-                    if len(line) > 20 and not line.startswith(filename):
-                        # Check if this looks like a description (sentence case, ends with period, etc)
-                        if line[0].isupper() or ':' in line:
-                            desc = line[:80]  # Limit to 80 chars
-                            return desc
-
-                # Fallback: use first non-empty substantial line
-                for line in lines[:10]:
-                    line = line.strip()
-                    if line and len(line) > 15 and not line.startswith('-'):
-                        if filename.lower() not in line.lower() or len(line) > len(filename) + 10:
-                            desc = line[:80]
-                            return desc
-        except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
-            pass
-
     return desc
 
 def discover_scripts():
@@ -270,21 +268,29 @@ def get_scripts():
     old_cache = load_cached_scripts()
     if old_cache:
         # Start background refresh (non-blocking)
-        import subprocess
-        subprocess.Popen(
-            [sys.executable, __file__, "--refresh-cache"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
+        if acquire_refresh_lock():
+            try:
+                subprocess.Popen(
+                    [sys.executable, __file__, "--refresh-cache", "--lock-held"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            except OSError:
+                release_refresh_lock()
         return old_cache
     else:
         # No cache at all, do sync discovery once
         return discover_scripts()
 
-def refresh_cache():
+def refresh_cache(lock_held=False):
     """Background task to refresh the cache"""
-    discover_scripts()
+    if not lock_held and not acquire_refresh_lock():
+        return
+    try:
+        discover_scripts()
+    finally:
+        release_refresh_lock()
 
 def get_current_session_id():
     """Get a unique session ID for this shell instance"""
@@ -383,7 +389,7 @@ def main():
     """Main entry point"""
     # Check if this is a background cache refresh
     if len(sys.argv) > 1 and sys.argv[1] == "--refresh-cache":
-        refresh_cache()
+        refresh_cache(lock_held="--lock-held" in sys.argv[2:])
         sys.exit(0)
 
     # Normal operation - show suggestion (once per session)

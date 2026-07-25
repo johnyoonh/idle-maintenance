@@ -35,7 +35,7 @@ DEFAULT_CONFIG = {
     "process_ignore_commands": [],
     "process_keep_days_limit": 1,
     "process_keep_backoff_multiplier": 2.0,
-    "process_keep_backoff_max_days": 30,
+    "process_keep_backoff_max_days": 60,
     "process_snooze_hours": 24,
     "process_cpu_sample_count": 3,
     "process_cpu_sample_interval_seconds": 30,
