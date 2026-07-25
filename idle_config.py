@@ -282,8 +282,6 @@ def parse_iostat_mib_per_second(output):
 
 def sample_disk_activity(sample_seconds=1, command_runner=subprocess.run, executable=None):
     executable = executable or shutil.which("iostat") or "/usr/sbin/iostat"
-    if not executable or not os.path.exists(executable):
-        return {"available": False, "mib_per_second": None, "error": "iostat unavailable"}
     wait = max(1, int(float(sample_seconds)))
     try:
         result = command_runner(
