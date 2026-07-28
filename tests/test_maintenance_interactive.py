@@ -102,7 +102,7 @@ class MaintenanceInteractiveTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertIn("Running 1-01:00:00", result[0]["reason"])
 
-    def test_sustained_io_detects_low_cpu_process(self):
+    def test_sustained_io_detects_low_cpu_process_with_attribution_boundary(self):
         mib = 1024 * 1024
         snapshots = iter([
             {31: process(31, 2, read=0, write=0)},
@@ -128,7 +128,8 @@ class MaintenanceInteractiveTests(unittest.TestCase):
         )
         self.assertEqual(len(result), 1)
         self.assertAlmostEqual(result[0]["average_total_mib_s"], 25.0)
-        self.assertIn("I/O averaged 25.0 MiB/s", result[0]["reason"])
+        self.assertIn("I/O charged to the process averaged 25.0 MiB/s", result[0]["reason"])
+        self.assertIn("not definitive physical-disk attribution", result[0]["reason"])
 
     def test_io_counter_reset_is_not_reported(self):
         mib = 1024 * 1024
@@ -175,7 +176,7 @@ class MaintenanceInteractiveTests(unittest.TestCase):
         self.assertEqual(result, "stale")
         signaler.assert_not_called()
 
-    def test_termination_does_not_auto_sigkill(self):
+    def test_termination_uses_sigterm_only(self):
         expected = process(42, 80)
         identities = iter([expected, expected, expected])
         signaler = Mock()
@@ -193,20 +194,34 @@ class MaintenanceInteractiveTests(unittest.TestCase):
         )
         self.assertEqual(result, "still_running")
         signaler.assert_called_once_with(42, signal.SIGTERM)
+        self.assertEqual(maintenance.force_kill_process(expected), "unsupported")
 
-    def test_investigation_prompt_contains_bounded_fs_usage(self):
+    def test_investigation_prompt_is_rootless_and_non_attributive(self):
         proc = process(55, 2)
-        proc.update({
-            "average_total_mib_s": 30,
-            "average_read_mib_s": 20,
-            "average_write_mib_s": 10,
-            "reason": "high I/O",
-        })
-        prompt = maintenance.build_process_investigation_prompt(
-            proc, {"process_fs_usage_trace_seconds": 12}
+        proc.update({"reason": "high I/O"})
+        prompt = maintenance.build_process_investigation_prompt(proc, {})
+        self.assertNotIn("fs_usage", prompt)
+        self.assertNotIn("sudo", prompt)
+        self.assertIn("rootless", prompt)
+        self.assertIn("not definitive physical-disk attribution", prompt)
+
+    def test_protected_daemon_policy_and_main_app_quit_policy(self):
+        daemon = process(1, 5, comm="mediaanalysisd", command="mediaanalysisd")
+        mail = process(
+            2,
+            5,
+            comm="/System/Applications/Mail.app/Contents/MacOS/Mail",
+            command="/System/Applications/Mail.app/Contents/MacOS/Mail",
         )
-        self.assertIn("sudo /usr/bin/fs_usage -w -f filesys -t 12 55", prompt)
-        self.assertIn("do not run it continuously", prompt)
+        shortcuts = process(
+            3,
+            5,
+            comm="/System/Applications/Shortcuts.app/Contents/MacOS/Shortcuts",
+            command="/System/Applications/Shortcuts.app/Contents/MacOS/Shortcuts",
+        )
+        self.assertEqual(maintenance.process_action_policy(daemon), "protected")
+        self.assertEqual(maintenance.process_action_policy(mail), "graceful-quit")
+        self.assertEqual(maintenance.process_action_policy(shortcuts), "graceful-quit")
 
     @patch("maintenance_interactive.time.time", return_value=1_735_776_000)
     def test_app_detail_explains_age_threshold_and_source(self, _time):
