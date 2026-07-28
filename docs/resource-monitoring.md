@@ -1,93 +1,73 @@
-# Resource-aware maintenance
+# Sustained resource monitoring
 
-Idle Maintenance now treats disk activity as a first-class resource signal instead of inferring it from CPU load.
+Idle Maintenance includes a single-instance process I/O monitor intended to surface sustained, reviewable incidents without taking autonomous corrective action.
 
-## Process detection
+## Detection policy
 
-The interactive process audit samples two independent signals:
+The monitor runs continuously under launchd and uses one 10-second aggregate `iostat` interval followed by one `proc_pid_rusage(RUSAGE_INFO_V2)` process snapshot. It keeps a rolling three-sample window, which produces two process-counter intervals.
 
-- sustained CPU utilization;
-- cumulative per-process disk bytes from `proc_pid_rusage(RUSAGE_INFO_V2)`.
+An incident opens only when all of these conditions hold:
 
-A process is considered a high-I/O candidate only when its counters increase monotonically for the same process instance, the configured throughput threshold is met for the required number of intervals, and the total sampled byte window exceeds the configured minimum. PID, process start identity, executable, and normalized command are retained so PID reuse cannot redirect a later termination action.
+- aggregate system disk throughput is at least 50 MiB/s;
+- process throughput is at least 20 MiB/s total or 10 MiB/s writes;
+- two intervals qualify across three process samples;
+- the two intervals contain at least 256 MiB total;
+- the PID, process start identity, executable, and normalized command remain the same;
+- cumulative counters remain monotonic.
 
-Queue and keep state use an executable-and-command fingerprint rather than `comm`. Multiple Python, Node, browser-helper, or Git processes therefore remain distinct.
+PID reuse and counter resets discard the rolling window. An active incident recovers after six available, non-qualifying samples.
 
-Default policy:
+The evidence statement is deliberately bounded: **I/O charged to the process during the sampled window; this is not definitive physical-disk attribution.** Per-process accounting can identify a useful correlation, but it cannot by itself prove which component caused physical storage traffic.
 
-```json
-{
-  "process_io_enabled": true,
-  "process_io_sample_count": 3,
-  "process_io_sample_interval_seconds": 10,
-  "process_high_io_total_mib_per_second": 20,
-  "process_high_io_write_mib_per_second": 10,
-  "process_io_minimum_window_mib": 256,
-  "process_io_required_intervals": 2,
-  "process_fs_usage_trace_seconds": 10,
-  "process_terminate_grace_seconds": 5
-}
-```
+## Notifications and review timing
 
-The process prompt still uses the existing **Investigate** action. For I/O candidates, the generated investigation prompt includes a bounded command such as:
+- Each process identity receives at most one notification every six hours.
+- The first incident is queued for review until the user returns after at least 15 minutes idle.
+- A second incident for the same process identity within 30 minutes of recovery opens the review prompt immediately.
+- Historical incidents remain in the incident ledger and JSONL history even after the live process queue changes.
 
-```bash
-sudo /usr/bin/fs_usage -w -f filesys -t 10 12345
-```
+State is written atomically under `$HOME/Library/Application Support/idle-maintenance/`:
 
-`fs_usage` is never run continuously or unattended. It is provided only for a user-selected short path-level diagnosis.
+- `resource-monitor-state.json`: bounded health, active incidents, recent incident summaries, notification cooldowns, and pending prompts;
+- `resource-monitor-history.jsonl`: bounded append history for incident open, recovery, and prompt outcomes;
+- `resource-monitor.lock`: the single-instance lock.
 
-## Termination safety
+Use `maint status` or `maint status --json` to inspect launchd health, monitor heartbeat, active incidents, queued prompts, recent incidents, and the attribution boundary.
 
-A terminate action now follows this sequence:
+## Process action policy
 
-1. Re-read the PID identity and verify user, start identity, executable, and command fingerprint.
-2. Send `SIGTERM`.
-3. Poll for up to the configured grace period.
-4. If the process remains alive, display a separate **Force Kill** confirmation.
-5. Revalidate identity again before any `SIGKILL`.
+Protected Apple daemons and similar helpers expose only **Investigate**, **Snooze**, and **Leave**. This includes `mediaanalysisd`, `photoanalysisd`, `contactsd`, `corespotlightd`, `mds`, `mdworker` variants, `fileproviderd`, and related indexing or cloud helpers.
 
-The previous automatic `SIGKILL` escalation after 400 milliseconds is removed.
+The main Mail and Shortcuts application processes may expose **Quit App**. A quit action:
 
-## Disk-busy gate
+1. re-reads the PID identity;
+2. refuses the action if the process instance changed;
+3. sends `SIGTERM` once;
+4. waits for the configured grace period;
+5. reports whether the app exited or remained running.
 
-`disk_activity.py` samples aggregate throughput with rootless `iostat`:
+There is no force-kill escalation. The monitor never terminates a process without a user selecting **Quit App**.
 
-```bash
-python3 disk_activity.py
-python3 disk_activity.py --json
-```
+## Safety boundary
 
-Exit codes:
+The unattended monitor never runs:
 
-- `0`: disk is below the configured threshold;
-- `75`: disk is busy and maintenance should be deferred;
-- `2`: activity could not be measured; callers may fail open while recording the error.
+- privileged commands or unattended `sudo`;
+- filesystem tracing;
+- recursive cloud-storage scans;
+- process throttling;
+- automatic termination.
 
-Default policy:
+Investigation prompts provide only bounded, rootless observations. Any deeper diagnosis remains an explicit, interactive decision outside the monitor.
 
-```json
-{
-  "system_disk_busy_mib_per_second": 50,
-  "system_disk_sample_seconds": 1
-}
-```
+## Balanced macOS settings
 
-The canonical external scheduled runner can use `disk_activity.py` before any high-I/O task. `storage_cleanup.py` applies the same gate itself and returns `75` when it defers.
+Use these as review placeholders rather than machine-specific automation:
 
-## Storage-cleanup load reduction
+- **Photos:** keep iCloud Photos enabled and enable **Optimize Mac Storage**.
+- **Mail:** set **Check for New Messages** to **Manually** and **Download Attachments** to **None**.
+- **Spotlight:** add only narrowly identified high-churn folders such as `<high-churn-build-folder>` to **Spotlight Search Privacy**. Do not exclude broad home, cloud, or document roots.
+- **Contacts:** leave synchronization unchanged until repeated incidents demonstrate sustained Contacts activity.
+- **Battery:** use **Automatic** Energy Mode.
 
-Daily cleanup still prunes aged cache, log, Trash, and Xcode artifacts. Expensive broad scans and package-manager cleanup now run only when either:
-
-- free space is below `minimum_free_gb + cleanup_pressure_headroom_gb`; or
-- their periodic interval is due.
-
-The default interval for both large-path inventory and package cleaners is seven days. State is persisted atomically in `storage-cleanup-state.json`.
-
-## State integrity
-
-Interactive state now uses:
-
-- `flock` under the application-support directory instead of a reusable PID file in `/tmp`;
-- temporary-file write, flush, `fsync`, and atomic replacement for JSON queues and keep state;
-- explicit logging when state persistence fails.
+These settings reduce unnecessary background work without disabling core synchronization or hiding broad storage areas from system services.
