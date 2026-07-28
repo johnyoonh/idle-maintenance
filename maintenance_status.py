@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Report scheduled and interactive idle-maintenance status."""
+"""Report scheduled, resource-monitor, and interactive idle-maintenance status."""
+from __future__ import annotations
 
 import argparse
 import json
@@ -10,21 +11,44 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from idle_config import is_terminal_suggestion_time, keep_entry_is_active, load_config
 
 LAUNCHD_LABEL = "com.john.idle-maintenance"
+MONITOR_LABEL = "com.john.idle-maintenance-monitor"
+MONITOR_STATE = "resource-monitor-state.json"
+MONITOR_HISTORY = "resource-monitor-history.jsonl"
+ATTRIBUTION_NOTE = (
+    "I/O charged to the process during the sampled window; "
+    "not definitive physical-disk attribution."
+)
 
 
-def load_json(path, default):
+def load_json(path: Path, default: Any) -> Any:
     try:
-        with open(path, "r") as handle:
-            return json.load(handle)
+        return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return default
 
 
-def expand_command(command, home):
+def load_recent_jsonl(path: Path, limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+    values = []
+    for line in lines[-max(1, limit):]:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            values.append(value)
+    return values
+
+
+def expand_command(command: Any, home: Path) -> list[str]:
     if isinstance(command, str):
         command = shlex.split(command)
     if not isinstance(command, list):
@@ -38,7 +62,7 @@ def expand_command(command, home):
     return expanded
 
 
-def resolve_runner_command(config, home):
+def resolve_runner_command(config: dict[str, Any], home: Path) -> list[str]:
     configured = expand_command(config.get("scheduled_runner_status_command", []), home)
     if configured:
         return configured
@@ -48,13 +72,13 @@ def resolve_runner_command(config, home):
     return [str(runner), "--status"] if runner.is_file() else []
 
 
-def parse_launchctl(output, returncode):
+def parse_launchctl(output: str, returncode: int) -> dict[str, Any]:
     state_match = re.search(r"^\s*state = (.+)$", output, re.MULTILINE)
     exit_match = re.search(r"^\s*last exit code = (-?\d+)$", output, re.MULTILINE)
     loaded = returncode == 0
     last_exit = int(exit_match.group(1)) if exit_match else None
     state = state_match.group(1).strip() if state_match else ("unloaded" if not loaded else "unknown")
-    healthy = loaded and (last_exit in {None, 0})
+    healthy = loaded and last_exit in {None, 0}
     return {
         "loaded": loaded,
         "state": state,
@@ -63,13 +87,27 @@ def parse_launchctl(output, returncode):
         "summary": (
             "Loaded and healthy (idle between scheduled runs)"
             if healthy and state == "not running"
-            else "Loaded and healthy" if healthy
-            else "Needs attention"
+            else "Loaded and healthy" if healthy else "Needs attention"
         ),
     }
 
 
-def latest_log_event(log_path):
+def launchd_status(label: str, command_runner) -> dict[str, Any]:
+    try:
+        result = command_runner(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return parse_launchctl(result.stdout or result.stderr, result.returncode)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        value = parse_launchctl(str(error), 1)
+        value["error"] = str(error)
+        return value
+
+
+def latest_log_event(log_path: Path) -> str:
     try:
         lines = [line.strip() for line in log_path.read_text(errors="replace").splitlines() if line.strip()]
     except OSError:
@@ -77,25 +115,22 @@ def latest_log_event(log_path):
     return lines[-1] if lines else "Runner log is empty."
 
 
-def queue_status(config, support_dir, now):
+def queue_status(config: dict[str, Any], support_dir: Path, now: float) -> dict[str, Any]:
     app_queue = load_json(support_dir / "stale_queue.json", [])
     process_queue = load_json(support_dir / "process_queue.json", [])
     app_keeps = load_json(support_dir / "custom_whitelist.json", {})
     process_keeps = load_json(support_dir / "process_whitelist.json", {})
     suggestion_state = load_json(support_dir / "state.json", {})
-    if not isinstance(app_queue, list):
-        app_queue = []
-    if not isinstance(process_queue, list):
-        process_queue = []
-    if not isinstance(app_keeps, dict):
-        app_keeps = {}
-    if not isinstance(process_keeps, dict):
-        process_keeps = {}
+    app_queue = app_queue if isinstance(app_queue, list) else []
+    process_queue = process_queue if isinstance(process_queue, list) else []
+    app_keeps = app_keeps if isinstance(app_keeps, dict) else {}
+    process_keeps = process_keeps if isinstance(process_keeps, dict) else {}
 
-    def snoozed(items, hours):
+    def snoozed(items: list[dict[str, Any]], hours: float) -> int:
         window = max(0.0, float(hours)) * 3600
         return sum(
-            1 for item in items
+            1
+            for item in items
             if 0 < float(item.get("last_prompted", 0) or 0)
             and now - float(item.get("last_prompted", 0)) < window
         )
@@ -104,9 +139,7 @@ def queue_status(config, support_dir, now):
         "apps": {
             "queued": len(app_queue),
             "snoozed": snoozed(app_queue, config.get("app_snooze_hours", 720)),
-            "backed_off": sum(
-                keep_entry_is_active(config, entry, now=now) for entry in app_keeps.values()
-            ),
+            "backed_off": sum(keep_entry_is_active(config, entry, now=now) for entry in app_keeps.values()),
         },
         "processes": {
             "queued": len(process_queue),
@@ -116,14 +149,65 @@ def queue_status(config, support_dir, now):
                 for entry in process_keeps.values()
             ),
         },
-        "terminal_disabled": len(suggestion_state.get("disabled", {})),
+        "terminal_disabled": len(suggestion_state.get("disabled", {}))
+        if isinstance(suggestion_state, dict)
+        else 0,
     }
 
 
-def render_text(status):
+def resource_monitor_status(
+    support_dir: Path,
+    launch: dict[str, Any],
+    now: float,
+    recent_limit: int = 5,
+) -> dict[str, Any]:
+    state = load_json(support_dir / MONITOR_STATE, {})
+    state = state if isinstance(state, dict) else {}
+    health = state.get("health") if isinstance(state.get("health"), dict) else {}
+    last_sample = float(health.get("last_sample_at", 0) or 0)
+    interval = max(1.0, float(health.get("sample_interval_seconds", 10) or 10))
+    stale_after = max(45.0, interval * 3)
+    last_error = str(health.get("last_error") or "")
+    if not state:
+        state_status = "not-started"
+    elif last_error:
+        state_status = "degraded"
+    elif not last_sample or now - last_sample > stale_after:
+        state_status = "stale"
+    else:
+        state_status = "healthy"
+    incidents = state.get("incidents") if isinstance(state.get("incidents"), list) else []
+    incidents = sorted(
+        [item for item in incidents if isinstance(item, dict)],
+        key=lambda item: float(item.get("last_seen_at", item.get("started_at", 0)) or 0),
+        reverse=True,
+    )[:recent_limit]
+    pending = state.get("pending_prompts") if isinstance(state.get("pending_prompts"), list) else []
+    active = state.get("active") if isinstance(state.get("active"), dict) else {}
+    history = load_recent_jsonl(support_dir / MONITOR_HISTORY, recent_limit)
+    healthy = launch.get("healthy", False) and state_status == "healthy"
+    return {
+        "launchd": launch,
+        "state": state_status,
+        "healthy": healthy,
+        "last_sample_at": last_sample or None,
+        "sample_age_seconds": round(now - last_sample, 1) if last_sample else None,
+        "last_system_mib_s": health.get("last_system_mib_s"),
+        "last_error": last_error,
+        "active_incidents": len(active),
+        "pending_prompts": len(pending),
+        "recent_incidents": incidents,
+        "recent_history": history,
+        "attribution_boundary": ATTRIBUTION_NOTE,
+    }
+
+
+def render_text(status: dict[str, Any]) -> str:
     runner = status["runner"]
+    monitor = status["resource_monitor"]
     queues = status["queues"]
     terminal = status["terminal_suggestions"]
+    monitor_launch = monitor["launchd"]
     lines = [
         "Idle maintenance status",
         "",
@@ -132,11 +216,22 @@ def render_text(status):
         f"Last exit code: {runner['last_exit_code'] if runner['last_exit_code'] is not None else 'unknown'}",
         f"Latest event: {status['latest_event']}",
         "",
+        "Resource monitor:",
+        f"- Health: {monitor['state']} (launchd: {monitor_launch['state']})",
+        f"- Active incidents: {monitor['active_incidents']}; queued review prompts: {monitor['pending_prompts']}",
+        f"- Latest system sample: {monitor['last_system_mib_s'] if monitor['last_system_mib_s'] is not None else 'unavailable'} MiB/s",
+        f"- Attribution: {monitor['attribution_boundary']}",
+        "",
         "Interactive review:",
         f"- Apps: {queues['apps']['queued']} queued, {queues['apps']['snoozed']} snoozed, {queues['apps']['backed_off']} backed off",
-        f"- Processes: {queues['processes']['queued']} queued, {queues['processes']['snoozed']} snoozed, {queues['processes']['backed_off']} backed off",
+        f"- Live processes: {queues['processes']['queued']} queued, {queues['processes']['snoozed']} snoozed, {queues['processes']['backed_off']} backed off",
         f"- Terminal: {'available now' if terminal['available_now'] else 'quiet now'} ({terminal['window']}), {queues['terminal_disabled']} dismissed",
     ]
+    for incident in monitor["recent_incidents"][:3]:
+        lines.append(
+            f"- Incident {incident.get('process', 'process')} PID {incident.get('pid', '?')}: "
+            f"{incident.get('status', 'unknown')}, peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s"
+        )
     runner_output = runner.get("status_output", "").strip()
     if runner_output:
         lines.extend(["", "Runner details:", runner_output])
@@ -152,22 +247,14 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
     support_dir = home / "Library/Application Support/idle-maintenance"
     log_path = home / "Library/Logs/wiki-automation/idle-maintenance-runtime.log"
 
-    launch = command_runner(
-        ["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    launch_status = parse_launchctl(launch.stdout or launch.stderr, launch.returncode)
-
+    launch_status = launchd_status(LAUNCHD_LABEL, command_runner)
+    monitor_launch = launchd_status(MONITOR_LABEL, command_runner)
     runner_command = resolve_runner_command(config, home)
     status_output = ""
     status_error = ""
     if runner_command:
         try:
-            result = command_runner(
-                runner_command, capture_output=True, text=True, timeout=10
-            )
+            result = command_runner(runner_command, capture_output=True, text=True, timeout=10)
             status_output = result.stdout.strip()
             if result.returncode != 0:
                 status_error = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
@@ -190,6 +277,7 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             "status_output": status_output,
             "status_error": status_error,
         },
+        "resource_monitor": resource_monitor_status(support_dir, monitor_launch, now),
         "latest_event": latest_log_event(log_path),
         "queues": queue_status(config, support_dir, now),
         "terminal_suggestions": {
@@ -210,7 +298,11 @@ def main(argv=None):
         print(json.dumps(status, indent=2, sort_keys=True))
     else:
         print(status["text"])
-    return 0 if status["runner"]["healthy"] else 1
+    monitor_started = status["resource_monitor"]["state"] != "not-started"
+    healthy = status["runner"]["healthy"] and (
+        not monitor_started or status["resource_monitor"]["healthy"]
+    )
+    return 0 if healthy else 1
 
 
 if __name__ == "__main__":
