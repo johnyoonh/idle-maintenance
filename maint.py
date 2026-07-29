@@ -14,7 +14,7 @@ SESSION_PATH = os.path.join(APP_SUPPORT_DIR, "session.json")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_SCRIPT = os.path.join(BASE_DIR, "prompt-suggest.py")
 
-COMMANDS = {"list", "run", "dismiss", "preview", "later", "enable", "status", "help"}
+COMMANDS = {"list", "run", "dismiss", "preview", "later", "enable", "status", "shortcuts", "help"}
 LEGACY_ACTIONS = {
     "1": "run", "r": "run", "run": "run",
     "2": "dismiss", "d": "dismiss", "delete": "dismiss", "dismiss": "dismiss",
@@ -184,6 +184,7 @@ Commands:
   later [script-id]     Defer it for its normal frequency
   enable <script-id>    Re-enable a dismissed suggestion
   status [--json]       Show scheduled and interactive maintenance status
+  shortcuts [--json]    Refresh shortcut content, then open the review popup
 
 If script-id is omitted, the current terminal suggestion is used.
 Legacy 'maint <script-id> <1-4>' forms remain temporarily supported.""")
@@ -215,8 +216,15 @@ def main(argv=None):
     if command == "list":
         return list_suggestions(include_all)
     if command == "status":
-        from maintenance_status import main as status_main
+        from maintenance_status_extended import main as status_main
+
         return status_main(["--json"] if as_json else [])
+    if command == "shortcuts":
+        from shortcut_review import render_result, run_shortcut_review
+
+        result = run_shortcut_review()
+        print(json.dumps(result, indent=2, sort_keys=True) if as_json else render_result(result))
+        return 0 if result.get("ok") else 1
     if command == "enable":
         if not script_id:
             print("maint enable requires a script-id.", file=sys.stderr)
