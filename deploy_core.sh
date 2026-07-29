@@ -1,26 +1,27 @@
 #!/bin/bash
+set -euo pipefail
 
-# Target directory
 DEST="$HOME/Library/Scripts/idle-maintenance"
-
-# Create destination if it doesn't exist
 mkdir -p "$DEST"
 
 echo "Deploying Idle Maintenance to $DEST..."
 
-# 1. Copy core scripts (always overwrite with latest logic)
+# Copy runtime scripts together so imports cannot resolve to mixed generations.
 cp app_auditor.py "$DEST/"
 cp idle_config.py "$DEST/"
 cp idle_watcher.py "$DEST/"
+cp maint.py "$DEST/"
 cp maintenance_interactive.py "$DEST/"
 cp maintenance_status.py "$DEST/"
+cp maintenance_status_extended.py "$DEST/"
 cp prompt.swift "$DEST/"
+cp shortcut_review.py "$DEST/"
 cp storage_cleanup.py "$DEST/"
 
-# 2. Copy data/config files ONLY if they don't exist (preserve user settings/state)
-cp -n config.json "$DEST/" 2>/dev/null
-cp -n custom_whitelist.json "$DEST/" 2>/dev/null
-cp -n stale_queue.json "$DEST/" 2>/dev/null
+# Preserve local settings and state.
+cp -n config.json "$DEST/" 2>/dev/null || true
+cp -n custom_whitelist.json "$DEST/" 2>/dev/null || true
+cp -n stale_queue.json "$DEST/" 2>/dev/null || true
 
 chmod +x "$DEST"/*.py
 chmod +x "$DEST"/*.swift
