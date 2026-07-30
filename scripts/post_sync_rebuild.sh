@@ -88,7 +88,7 @@ if [[ "$was_running" == "1" ]]; then
     "$sleep_bin" "$restart_sleep_seconds"
   done
   if "$pgrep_bin" -x IdleMaintenance >/dev/null 2>&1; then
-    log "post-sync rebuild installed the new app, but the prior process did not exit after SIGTERM; leaving it closed to a later manual restart"
+    log "post-sync rebuild installed the new app, but the prior process did not exit after SIGTERM; leaving the still-running process untouched until a later successful or manual restart"
     exit 75
   fi
   "$open_bin" -g "$APP_PATH"
