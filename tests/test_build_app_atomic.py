@@ -24,6 +24,13 @@ class AtomicBuildTests(unittest.TestCase):
             "import shutil, sys\nshutil.copy2(sys.argv[1], sys.argv[2])\n",
             encoding="utf-8",
         )
+        (source / "build_app_style_fix.py").write_text(
+            "import sys\n"
+            "src, dst = sys.argv[1:3]\n"
+            "data = open(src, 'rb').read()\n"
+            "open(dst, 'wb').write(data)\n",
+            encoding="utf-8",
+        )
         (source / "build_app_core.sh").write_text(
             """#!/bin/bash
 set -euo pipefail
@@ -95,6 +102,7 @@ printf new > "$app/new-marker"
     def test_script_never_deletes_installed_path_directly(self):
         text = (ROOT / "build_app.sh").read_text(encoding="utf-8")
         self.assertNotIn('rm -rf "$APP_PATH"', text)
+        self.assertIn('build_app_style_fix.py" "$TMP_CORE" "$TMP_CORE"', text)
         self.assertIn('"$TMP_CORE" "$STAGE_ROOT"', text)
         self.assertLess(text.index('codesign --verify --deep --strict "$STAGED_APP"'), text.index('mv -- "$APP_PATH" "$BACKUP_PATH"'))
 
