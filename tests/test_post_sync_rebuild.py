@@ -124,7 +124,7 @@ class PostSyncRebuildTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 75, result.stderr)
             self.assertFalse(marker.exists())
-            self.assertIn("did not exit after SIGTERM", result.stdout)
+            self.assertIn("leaving the still-running process untouched", result.stdout)
 
 
 if __name__ == "__main__":
