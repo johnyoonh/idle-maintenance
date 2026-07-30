@@ -63,6 +63,8 @@ pgrep_bin="${IDLE_MAINTENANCE_PGREP_BIN:-pgrep}"
 pkill_bin="${IDLE_MAINTENANCE_PKILL_BIN:-pkill}"
 open_bin="${IDLE_MAINTENANCE_OPEN_BIN:-open}"
 sleep_bin="${IDLE_MAINTENANCE_SLEEP_BIN:-sleep}"
+restart_attempts="${IDLE_MAINTENANCE_RESTART_ATTEMPTS:-50}"
+restart_sleep_seconds="${IDLE_MAINTENANCE_RESTART_SLEEP_SECONDS:-0.2}"
 was_running=0
 if command -v "$pgrep_bin" >/dev/null 2>&1 && "$pgrep_bin" -x IdleMaintenance >/dev/null 2>&1; then
   was_running=1
@@ -79,12 +81,16 @@ CODESIGN_IDENTITY="$identity" "$ROOT/build_app.sh" "$DEST_DIR" >>"$LOG_FILE" 2>&
 if [[ "$was_running" == "1" ]]; then
   log "restarting the existing menu-bar process with the rebuilt app"
   "$pkill_bin" -TERM -x IdleMaintenance 2>/dev/null || true
-  for _ in 1 2 3 4 5; do
+  for ((attempt = 0; attempt < restart_attempts; attempt++)); do
     if ! "$pgrep_bin" -x IdleMaintenance >/dev/null 2>&1; then
       break
     fi
-    "$sleep_bin" 0.2
+    "$sleep_bin" "$restart_sleep_seconds"
   done
+  if "$pgrep_bin" -x IdleMaintenance >/dev/null 2>&1; then
+    log "post-sync rebuild installed the new app, but the prior process did not exit after SIGTERM; leaving it closed to a later manual restart"
+    exit 75
+  fi
   "$open_bin" -g "$APP_PATH"
 fi
 

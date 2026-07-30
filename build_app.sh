@@ -44,6 +44,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 python3 "$SRC_DIR/build_app_overlay.py" "$SRC_DIR/build_app_core.sh" "$TMP_CORE"
+python3 "$SRC_DIR/build_app_style_fix.py" "$TMP_CORE" "$TMP_CORE"
 chmod +x "$TMP_CORE"
 
 # The legacy builder is intentionally confined to a same-filesystem staging
