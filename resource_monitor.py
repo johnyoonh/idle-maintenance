@@ -320,11 +320,27 @@ class ResourceMonitor:
             incident["prompted_at"] = now
             self._history("prompt-skipped", incident, reason="process identity changed")
         else:
-            action = self.prompt_fn(current, incident)
-            incident["prompt_status"] = "completed"
-            incident["prompt_action"] = str(action)
-            incident["prompted_at"] = now
-            self._history("prompted", incident, action=str(action))
+            try:
+                action = self.prompt_fn(current, incident)
+            except Exception as error:
+                detail = str(error).strip() or type(error).__name__
+                incident["prompt_status"] = "failed"
+                incident["prompt_error"] = detail[:500]
+                incident["prompted_at"] = now
+                self.state["prompt_health"] = {
+                    "last_error": detail[:500],
+                    "last_error_at": now,
+                }
+                self._history("prompt-failed", incident, error=detail[:500])
+            else:
+                incident["prompt_status"] = "completed"
+                incident["prompt_action"] = str(action)
+                incident["prompted_at"] = now
+                self.state["prompt_health"] = {
+                    "last_error": "",
+                    "last_success_at": now,
+                }
+                self._history("prompted", incident, action=str(action))
         self.state["pending_prompts"] = [
             value for value in self.state["pending_prompts"] if value != incident["id"]
         ]
@@ -425,12 +441,16 @@ class ResourceMonitor:
                     self._history("recovered", incident, cool_samples=recovery_samples)
 
         self._handle_idle_return(float(idle_seconds), observed_at)
+        prompt_health = self.state.get("prompt_health") if isinstance(self.state.get("prompt_health"), dict) else {}
         self.state["health"] = {
             "pid": os.getpid(),
             "last_sample_at": observed_at,
             "sample_interval_seconds": self.interval_seconds,
             "last_system_mib_s": system_rate if available else None,
             "last_error": "" if available else str(system_status.get("error") or "iostat unavailable"),
+            "last_prompt_error": str(prompt_health.get("last_error") or ""),
+            "last_prompt_error_at": prompt_health.get("last_error_at"),
+            "last_prompt_success_at": prompt_health.get("last_success_at"),
             "active_incidents": len(self.state["active"]),
             "pending_prompts": len(self.state["pending_prompts"]),
         }

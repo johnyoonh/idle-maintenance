@@ -434,21 +434,23 @@ def prompt_process(proc, snooze_hours=24, keep_days=1):
             detail += f" • {offender_summary}"
     display_path = command or proc["comm"]
     swift_script = os.path.join(BASE_DIR, "prompt.swift")
+    command = [
+        "swift",
+        swift_script,
+        display_name,
+        display_path,
+        "false",
+        "process",
+        detail,
+        str(snooze_hours),
+        str(keep_days),
+    ]
     try:
-        res = subprocess.check_output(
-            [
-                "swift",
-                swift_script,
-                display_name,
-                display_path,
-                "false",
-                "process",
-                detail,
-                str(snooze_hours),
-                str(keep_days),
-            ],
-            text=True
-        ).strip()
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or f"swift exited {result.returncode}").strip()
+            raise RuntimeError(detail.splitlines()[-1][:500])
+        res = result.stdout.strip()
         upper = res.upper()
         if upper == "DELETE":
             return "KILL"
@@ -457,7 +459,7 @@ def prompt_process(proc, snooze_hours=24, keep_days=1):
         return "QUIT"
     except Exception as e:
         log(f"Process prompt failed for {proc.get('comm', '?')}: {e}")
-        return "QUIT"
+        raise RuntimeError(f"process prompt failed: {e}") from e
 
 def build_process_investigation_prompt(proc):
     lines = [

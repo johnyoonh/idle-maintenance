@@ -168,9 +168,10 @@ def resource_monitor_status(
     interval = max(1.0, float(health.get("sample_interval_seconds", 10) or 10))
     stale_after = max(45.0, interval * 3)
     last_error = str(health.get("last_error") or "")
+    last_prompt_error = str(health.get("last_prompt_error") or "")
     if not state:
         state_status = "not-started"
-    elif last_error:
+    elif last_error or last_prompt_error:
         state_status = "degraded"
     elif not last_sample or now - last_sample > stale_after:
         state_status = "stale"
@@ -194,6 +195,7 @@ def resource_monitor_status(
         "sample_age_seconds": round(now - last_sample, 1) if last_sample else None,
         "last_system_mib_s": health.get("last_system_mib_s"),
         "last_error": last_error,
+        "last_prompt_error": last_prompt_error,
         "active_incidents": len(active),
         "pending_prompts": len(pending),
         "recent_incidents": incidents,

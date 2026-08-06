@@ -8,6 +8,10 @@ struct PromptAction {
     let confirmation: String?
 }
 
+final class ActionButton: NSButton {
+    var result = ""
+}
+
 final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let window = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
@@ -183,9 +187,9 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let totalWidth: CGFloat = 592
         let width = (totalWidth - spacing * CGFloat(values.count - 1)) / CGFloat(values.count)
         for (index, action) in values.enumerated() {
-            let button = NSButton(title: action.title, target: self, action: #selector(onButton(_:)))
+            let button = ActionButton(title: action.title, target: self, action: #selector(onButton(_:)))
             button.frame = NSRect(x: 24 + CGFloat(index) * (width + spacing), y: 30, width: width, height: 34)
-            button.representedObject = action.result
+            button.result = action.result
             if action.result == "DELETE" { button.isEnabled = deleteEnabled }
             content.addSubview(button)
         }
@@ -218,9 +222,8 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         finish(action.result)
     }
 
-    @objc func onButton(_ sender: NSButton) {
-        guard let result = sender.representedObject as? String,
-              let action = actions().first(where: { $0.result == result }) else { return }
+    @objc func onButton(_ sender: ActionButton) {
+        guard let action = actions().first(where: { $0.result == sender.result }) else { return }
         perform(action)
     }
 

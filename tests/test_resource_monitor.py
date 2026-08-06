@@ -91,6 +91,28 @@ class ResourceMonitorTests(unittest.TestCase):
         self.assertEqual(len(self.monitor.state["incidents"]), 1)
         return p2, self.monitor.state["incidents"][0]
 
+    def test_prompt_failure_is_persisted_in_monitor_health(self):
+        incident = {
+            "id": "prompt-failure",
+            "pid": 42,
+            "process": "sample",
+            "process_identity": process_instance_id(self.current),
+            "process_snapshot": self.current,
+            "prompt_status": "queued",
+        }
+        self.monitor.state["incidents"] = [incident]
+        self.monitor.state["pending_prompts"] = [incident["id"]]
+        self.monitor.prompt_fn = lambda _process, _incident: (_ for _ in ()).throw(
+            RuntimeError("synthetic prompt failure")
+        )
+
+        self.monitor._deliver_prompt(incident, self.clock)
+
+        self.assertEqual("failed", incident["prompt_status"])
+        self.assertEqual("synthetic prompt failure", incident["prompt_error"])
+        self.assertEqual("synthetic prompt failure", self.monitor.state["prompt_health"]["last_error"])
+        self.assertEqual([], self.monitor.state["pending_prompts"])
+
     def cool_and_recover(self, previous, samples=6):
         current = previous
         for _ in range(samples):
@@ -242,6 +264,32 @@ class ProcessPolicyTests(unittest.TestCase):
 
 
 class StatusTests(unittest.TestCase):
+    def test_status_degrades_when_prompt_delivery_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            support = home / "Library/Application Support/idle-maintenance"
+            support.mkdir(parents=True)
+            now = 1_800_000_000
+            (support / "resource-monitor-state.json").write_text(json.dumps({
+                "schema_version": 1,
+                "health": {
+                    "last_sample_at": now - 5,
+                    "sample_interval_seconds": 10,
+                    "last_error": "",
+                    "last_prompt_error": "synthetic prompt failure",
+                },
+            }))
+
+            status = maintenance_status.resource_monitor_status(
+                support,
+                {"healthy": True, "state": "running"},
+                now,
+            )
+
+            self.assertFalse(status["healthy"])
+            self.assertEqual("degraded", status["state"])
+            self.assertEqual("synthetic prompt failure", status["last_prompt_error"])
+
     def test_status_json_exposes_monitor_health_and_incidents(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
