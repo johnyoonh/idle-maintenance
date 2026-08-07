@@ -18,26 +18,63 @@ ATTRIBUTION_NOTE = (
     "I/O charged to the process during the sampled window; "
     "this is not definitive physical-disk attribution."
 )
+
+KNOWN_PROCESS_PROFILES = (
+    {
+        "names": {"mds", "mds_stores", "corespotlightd"},
+        "prefixes": ("mdworker", "corespotlight"),
+        "role": "Spotlight/Core Spotlight indexing",
+        "default_action": "Leave it running. If high usage keeps recurring after indexing should settle, inspect recent indexing churn or excluded paths instead of terminating the daemon.",
+    },
+    {
+        "names": {"mediaanalysisd", "photoanalysisd"},
+        "prefixes": ("mediaanalysis", "photoanalysis"),
+        "role": "Photos and media analysis",
+        "default_action": "Leave it running while imports, face/object analysis, or photo-library synchronization settle; investigate only if the load remains sustained or repeatedly returns.",
+    },
+    {
+        "names": {"fileproviderd", "bird", "cloudd"},
+        "prefixes": ("fileprovider",),
+        "role": "iCloud/File Provider synchronization",
+        "default_action": "Leave it running and check the relevant sync provider or backlog if activity persists. Do not kill the sync daemon as a first response.",
+    },
+    {
+        "names": {"contactsd"},
+        "prefixes": ("contacts",),
+        "role": "Contacts synchronization and indexing",
+        "default_action": "Leave it running. If the activity repeatedly returns, inspect account synchronization state before considering application-level changes.",
+    },
+    {
+        "names": {"suggestd", "knowledge-agent"},
+        "prefixes": (),
+        "role": "Apple suggestions/knowledge indexing",
+        "default_action": "Leave it running unless sustained measurements keep recurring; prefer identifying the source data or recent system activity over terminating the service.",
+    },
+    {
+        "names": {"backupd", "backupd-helper"},
+        "prefixes": (),
+        "role": "Time Machine backup",
+        "default_action": "Allow an expected backup to finish. If activity is unexpected or repeatedly stalls, inspect Time Machine status and the backup destination rather than killing backupd.",
+    },
+    {
+        "names": {"softwareupdated", "storedownloadd", "installd"},
+        "prefixes": (),
+        "role": "macOS software download/update installation",
+        "default_action": "Allow an expected update to finish. If activity is recurrent without visible progress, inspect Software Update state rather than terminating the system service.",
+    },
+    {
+        "names": {"windowserver", "powerd", "trustd", "runningboardd"},
+        "prefixes": (),
+        "role": "Core macOS system service",
+        "default_action": "Do not terminate it. Treat sustained resource use as a symptom and inspect the applications, display workload, power state, or trust activity driving it.",
+    },
+)
+
 PROTECTED_APPLE_DAEMONS = {
-    "mediaanalysisd",
-    "photoanalysisd",
-    "contactsd",
-    "corespotlightd",
-    "mds",
-    "mds_stores",
-    "fileproviderd",
-    "bird",
-    "cloudd",
-    "suggestd",
-    "knowledge-agent",
+    name for profile in KNOWN_PROCESS_PROFILES for name in profile["names"]
 }
-PROTECTED_PREFIXES = (
-    "mdworker",
-    "mediaanalysis",
-    "photoanalysis",
-    "contacts",
-    "corespotlight",
-    "fileprovider",
+PROTECTED_PREFIXES = tuple(
+    prefix for profile in KNOWN_PROCESS_PROFILES for prefix in profile["prefixes"]
 )
 
 
@@ -53,10 +90,37 @@ def _display(proc: dict[str, Any]) -> str:
     return f"{name} ({command})" if command and command.lower() != name else name
 
 
+def known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
+    """Return deterministic handling guidance for common macOS background processes."""
+    name = _base_name(proc)
+    for profile in KNOWN_PROCESS_PROFILES:
+        if name in profile["names"] or name.startswith(profile["prefixes"]):
+            return {
+                "name": name,
+                "role": str(profile["role"]),
+                "default_action": str(profile["default_action"]),
+                "policy": "observe-first",
+            }
+    return None
+
+
+def should_suppress_process_alert(proc: dict[str, Any]) -> bool:
+    """Suppress low-confidence long-running-only alerts for known macOS services."""
+    if not known_process_guidance(proc):
+        return False
+    reason = str(proc.get("reason") or "")
+    if not reason:
+        return False
+    strong_signals = ("CPU stayed at or above", "I/O charged to the process")
+    if any(signal_text in reason for signal_text in strong_signals):
+        return False
+    return reason.startswith("Running ") or " • Running " in reason
+
+
 def process_action_policy(proc: dict[str, Any]) -> str:
     """Return protected, graceful-quit, or review-only for a process instance."""
     name = _base_name(proc)
-    if name in PROTECTED_APPLE_DAEMONS or name.startswith(PROTECTED_PREFIXES):
+    if known_process_guidance(proc) or name in PROTECTED_APPLE_DAEMONS or name.startswith(PROTECTED_PREFIXES):
         return "protected"
     command = str(proc.get("command") or "")
     if name == "mail" and ".app/Contents/MacOS/Mail" in command:
@@ -64,6 +128,16 @@ def process_action_policy(proc: dict[str, Any]) -> str:
     if name == "shortcuts" and ".app/Contents/MacOS/Shortcuts" in command:
         return "graceful-quit"
     return "review-only"
+
+
+def _known_context(proc: dict[str, Any]) -> list[str]:
+    guidance = known_process_guidance(proc)
+    if not guidance:
+        return []
+    return [
+        f"Known macOS role: {guidance['role']}",
+        f"Default handling: {guidance['default_action']}",
+    ]
 
 
 def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, keep_days: float = 1) -> str:
@@ -78,46 +152,58 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
             f"{x['total_mib_s']:.1f} MiB/s ({x['write_mib_s']:.1f} write)" for x in rates
         )
         detail += f"\n{ATTRIBUTION_NOTE}"
+    context = _known_context(proc)
+    if context:
+        detail += "\n" + "\n".join(context)
     policy = process_action_policy(proc)
+    command = [
+        "swift",
+        os.path.join(core.BASE_DIR, "prompt.swift"),
+        _display(proc),
+        proc.get("command") or proc.get("comm", ""),
+        "false",
+        "process",
+        detail,
+        str(snooze_hours),
+        str(keep_days),
+        policy,
+    ]
     try:
-        result = subprocess.check_output(
-            [
-                "swift",
-                os.path.join(core.BASE_DIR, "prompt.swift"),
-                _display(proc),
-                proc.get("command") or proc.get("comm", ""),
-                "false",
-                "process",
-                detail,
-                str(snooze_hours),
-                str(keep_days),
-                policy,
-            ],
-            text=True,
-        ).strip().upper()
-    except (OSError, subprocess.CalledProcessError):
-        return "QUIT"
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+    except OSError as error:
+        raise RuntimeError(f"process prompt failed: {error}") from error
+    if result.returncode != 0:
+        failure = (result.stderr or result.stdout or f"swift exited {result.returncode}").strip()
+        failure = failure.splitlines()[-1][:500] if failure else f"swift exited {result.returncode}"
+        raise RuntimeError(f"process prompt failed: {failure}")
+    value = result.stdout.strip().upper()
     allowed = {"INVESTIGATE", "KEEP", "SNOOZE", "QUIT"}
     if policy == "graceful-quit":
         allowed.add("GRACEFUL_QUIT")
-    return result if result in allowed else "QUIT"
+    return value if value in allowed else "QUIT"
 
 
 def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any] | None = None) -> str:
     del core, config
-    return "\n".join(
+    lines = [
+        "Investigate this high-impact macOS process and help me decide what to do.",
+        "",
+        "Use rootless, bounded inspection only. Do not run privileged tracing, recursive cloud scans, throttling, or termination automatically.",
+        "When known macOS context is supplied below, treat it as the default classification instead of re-investigating generic process identity from scratch.",
+        "",
+        "Please cover:",
+        "1. Whether the measured behavior fits the known role or is genuinely unusual.",
+        "2. Why it may be using CPU or disk I/O now.",
+        "3. Which rootless observations would distinguish the likely causes.",
+        "4. Whether a user-initiated graceful quit is appropriate.",
+        "5. Recommended next action.",
+        "",
+    ]
+    context = _known_context(proc)
+    if context:
+        lines.extend(["Known macOS context:", *[f"- {item}" for item in context], ""])
+    lines.extend(
         [
-            "Investigate this high-impact macOS process and help me decide what to do.",
-            "",
-            "Use rootless, bounded inspection only. Do not run privileged tracing, recursive cloud scans, throttling, or termination automatically.",
-            "",
-            "Please cover:",
-            "1. What this process likely is.",
-            "2. Why it may be using CPU or disk I/O now.",
-            "3. Which rootless observations would distinguish the likely causes.",
-            "4. Whether a user-initiated graceful quit is appropriate.",
-            "5. Recommended next action.",
-            "",
             "Process details:",
             f"- PID: {proc['pid']}",
             f"- Command: {proc.get('command', '')}",
@@ -131,6 +217,7 @@ def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any]
             f"- lsof -p {proc['pid']} -Fn",
         ]
     )
+    return "\n".join(lines)
 
 
 def terminate(
@@ -191,7 +278,10 @@ def run_process_audit(core: Any, config: dict[str, Any], prompt_budget: int | No
         limit = min(limit, max(0, int(prompt_budget)))
     if limit <= 0:
         return True, 0
-    candidates = get_candidate_processes(config)
+    candidates = [
+        proc for proc in get_candidate_processes(config)
+        if not should_suppress_process_alert(proc)
+    ]
     by_key = {proc["process_key"]: proc for proc in candidates}
     queue = core.load_json(core.PROCESS_QUEUE_PATH)
     queue = queue if isinstance(queue, list) else []
@@ -295,6 +385,8 @@ def install(core: Any) -> None:
     core.get_process_snapshot = lambda config: identity.snapshot(config)
     core.get_candidate_processes = get_candidate_processes
     core.process_action_policy = process_action_policy
+    core.known_process_guidance = known_process_guidance
+    core.should_suppress_process_alert = should_suppress_process_alert
     core.prompt_process = lambda proc, snooze_hours=24, keep_days=1: prompt_process(
         core, proc, snooze_hours, keep_days
     )
