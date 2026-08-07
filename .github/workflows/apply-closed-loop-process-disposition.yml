@@ -1,0 +1,60 @@
+name: Apply closed-loop process disposition patch
+
+on:
+  push:
+    branches:
+      - chatgpt/closed-loop-process-disposition
+    paths:
+      - .github/workflows/apply-closed-loop-process-disposition.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/closed-loop-process-disposition
+          fetch-depth: 0
+
+      - name: Unpack reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .chatgpt-patch/bundle.part-* | base64 --decode > /tmp/closed-loop-process-disposition.tgz
+          test "$(sha256sum /tmp/closed-loop-process-disposition.tgz | awk '{print $1}')" = "c1b12e70e5fde6bddd7477fd66247fe1fff225fc402be0ca2d5e57990edc9ece"
+          tar -xzf /tmp/closed-loop-process-disposition.tgz -C .
+          rm -rf .chatgpt-patch
+          rm -f .github/workflows/apply-closed-loop-process-disposition.yml
+
+      - name: Validate focused behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python3 -m unittest -v \
+            tests.test_process_assessment \
+            tests.test_assessment_status \
+            tests.test_build_app_atomic
+          python3 - <<'PY'
+          from tests.test_runtime_packaging import test_review_runtime_is_packaged_for_app_and_script_deployments
+          test_review_runtime_is_packaged_for_app_and_script_deployments()
+          PY
+          python3 -m compileall -q \
+            process_assessment.py \
+            process_review.py \
+            maintenance_status.py \
+            idle_config.py \
+            tests
+          bash -n build_app.sh deploy_core.sh
+
+      - name: Commit validated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add closed-loop process dispositions"
+          git push origin HEAD:chatgpt/closed-loop-process-disposition
