@@ -13,10 +13,20 @@ from process_review import (
     should_suppress_process_alert,
 )
 from process_sampling import get_candidate_processes
+from process_triage import triage_process
 from resource_monitor import MIB, ResourceMonitor, run_monitor
 
 
-def proc(pid=42, *, cpu=1.0, read=0, write=0, command="sample", comm="sample"):
+def proc(
+    pid=42,
+    *,
+    cpu=1.0,
+    read=0,
+    write=0,
+    command="sample",
+    comm="sample",
+    start=100,
+):
     value = {
         "pid": pid,
         "ppid": 1,
@@ -25,7 +35,7 @@ def proc(pid=42, *, cpu=1.0, read=0, write=0, command="sample", comm="sample"):
         "etime": "1-01:00:00",
         "elapsed_seconds": 25 * 3600,
         "start_time": "Fri Aug 7 12:00:00 2026",
-        "start_abstime": 100,
+        "start_abstime": start,
         "comm": comm,
         "command": command,
         "fingerprint": identity.fingerprint(command),
@@ -80,27 +90,41 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
         self.assertEqual(1, len(found))
         self.assertIn("across 3 samples", found[0]["reason"])
 
-    def test_known_macos_long_running_only_alert_is_suppressed(self):
+    def test_known_macos_activity_suppresses_normal_but_not_extreme_use(self):
+        config = {
+            "process_high_cpu_threshold": 50,
+            "process_high_io_total_mib_per_second": 20,
+            "process_high_io_write_mib_per_second": 10,
+            "process_routine_review_multiplier": 4,
+        }
         mds = proc(command="mds", comm="mds")
         mds["reason"] = (
             "Running 1-01:00:00 (limit 24h) with CPU at or above "
             "10.0% across 3 samples"
         )
-        self.assertTrue(should_suppress_process_alert(mds))
+        self.assertTrue(should_suppress_process_alert(mds, config))
         mds["reason"] = "CPU stayed at or above 50.0% for 3 samples over 60s"
-        self.assertFalse(should_suppress_process_alert(mds))
+        mds["cpu_samples"] = [75, 80, 70]
+        self.assertTrue(should_suppress_process_alert(mds, config))
+        mds["cpu_samples"] = [250, 240, 230]
+        self.assertFalse(should_suppress_process_alert(mds, config))
         self.assertEqual("protected", process_action_policy(mds))
 
-    def test_known_context_is_reused_in_investigation_prompt(self):
+    def test_known_context_reuses_triage_and_recurrence_group(self):
         mds = proc(command="mds", comm="mds")
         guidance = known_process_guidance(mds)
         self.assertIn("Spotlight", guidance["role"])
+        self.assertEqual("spotlight-indexing", guidance["recurrence_group"])
+        triage = triage_process(mds, guidance, {}, recurrence=True)
+        mds["resource_triage"] = triage
         prompt = investigation_prompt(None, mds, {})
         self.assertIn("Known macOS context", prompt)
         self.assertIn("Spotlight/Core Spotlight indexing", prompt)
         self.assertIn("Default handling", prompt)
+        self.assertIn("Deterministic triage: review", prompt)
+        self.assertIn("recurred within the review window", prompt)
 
-    def test_known_background_first_io_incident_does_not_queue_generic_prompt(self):
+    def test_known_background_first_io_incident_is_silent_but_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             notifications = []
             config = {
@@ -111,10 +135,11 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
                 "system_disk_busy_mib_per_second": 50,
                 "resource_monitor_interval_seconds": 10,
             }
+            history_path = Path(directory) / "history.jsonl"
             monitor = ResourceMonitor(
                 config,
                 state_path=Path(directory) / "state.json",
-                history_path=Path(directory) / "history.jsonl",
+                history_path=history_path,
                 now_fn=lambda: 1000,
                 notify_fn=lambda title, message: notifications.append((title, message)),
                 identity_reader=lambda _pid: None,
@@ -126,10 +151,101 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
             monitor.observe({42: p0}, {42: p1}, status, seconds=10, now=1010)
             monitor.observe({42: p1}, {42: p2}, status, seconds=10, now=1020)
             incident = monitor.state["incidents"][0]
-            self.assertEqual("known-background", incident["prompt_status"])
+            self.assertEqual("suppressed", incident["prompt_status"])
+            self.assertEqual("suppress", incident["triage"]["decision"])
             self.assertEqual([], monitor.state["pending_prompts"])
+            self.assertEqual([], notifications)
             self.assertIn("Spotlight", incident["known_process"]["role"])
-            self.assertEqual("Idle Maintenance background activity", notifications[0][0])
+            self.assertEqual(1, monitor.state["health"]["suppressed_incidents"])
+            events = [json.loads(line)["event"] for line in history_path.read_text().splitlines()]
+            self.assertEqual(["opened", "suppressed"], events[-2:])
+
+    def test_known_recurrence_escalates_across_pid_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = []
+            prompts = []
+            current = {}
+            config = {
+                "process_high_io_total_mib_per_second": 20,
+                "process_high_io_write_mib_per_second": 10,
+                "process_io_minimum_window_mib": 256,
+                "process_io_required_intervals": 2,
+                "system_disk_busy_mib_per_second": 50,
+                "resource_monitor_interval_seconds": 10,
+                "resource_monitor_recovery_cool_samples": 1,
+                "resource_monitor_recurrence_seconds": 30 * 60,
+            }
+            monitor = ResourceMonitor(
+                config,
+                state_path=Path(directory) / "state.json",
+                history_path=Path(directory) / "history.jsonl",
+                now_fn=lambda: 1000,
+                notify_fn=lambda title, message: notifications.append((title, message)),
+                prompt_fn=lambda process, incident: prompts.append((process, incident)) or "KEEP",
+                identity_reader=lambda pid: current.get(pid),
+            )
+            status_hot = {"available": True, "mib_per_second": 60, "error": ""}
+            status_cool = {"available": True, "mib_per_second": 1, "error": ""}
+
+            p0 = proc(command="mds", comm="mds", start=100)
+            p1 = proc(command="mds", comm="mds", read=160 * MIB, write=100 * MIB, start=100)
+            p2 = proc(command="mds", comm="mds", read=320 * MIB, write=200 * MIB, start=100)
+            current.clear(); current.update({42: p1})
+            monitor.observe({42: p0}, {42: p1}, status_hot, seconds=10, now=1010)
+            current.clear(); current.update({42: p2})
+            monitor.observe({42: p1}, {42: p2}, status_hot, seconds=10, now=1020)
+            cool = proc(command="mds", comm="mds", read=321 * MIB, write=200 * MIB, start=100)
+            current.clear(); current.update({42: cool})
+            monitor.observe({42: p2}, {42: cool}, status_cool, seconds=10, now=1030)
+            self.assertEqual("recovered", monitor.state["incidents"][0]["status"])
+
+            q0 = proc(43, command="mds --role changed", comm="mds", start=200)
+            q1 = proc(43, command="mds --role changed", comm="mds", read=160 * MIB, write=100 * MIB, start=200)
+            q2 = proc(43, command="mds --role changed", comm="mds", read=320 * MIB, write=200 * MIB, start=200)
+            current.clear(); current.update({43: q1})
+            monitor.observe({43: q0}, {43: q1}, status_hot, seconds=10, now=1340)
+            current.clear(); current.update({43: q2})
+            monitor.observe({43: q1}, {43: q2}, status_hot, seconds=10, now=1350)
+            second = monitor.state["incidents"][-1]
+            self.assertNotEqual(monitor.state["incidents"][0]["process_key"], second["process_key"])
+            self.assertTrue(second["recurrence"])
+            self.assertEqual("review", second["triage"]["decision"])
+            self.assertEqual("completed", second["prompt_status"])
+            self.assertEqual(1, len(notifications))
+            self.assertEqual(1, len(prompts))
+
+    def test_extreme_known_io_still_queues_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = []
+            config = {
+                "process_high_io_total_mib_per_second": 20,
+                "process_high_io_write_mib_per_second": 10,
+                "process_io_minimum_window_mib": 256,
+                "process_io_required_intervals": 2,
+                "system_disk_busy_mib_per_second": 50,
+                "resource_monitor_interval_seconds": 10,
+                "process_routine_review_multiplier": 4,
+            }
+            monitor = ResourceMonitor(
+                config,
+                state_path=Path(directory) / "state.json",
+                history_path=Path(directory) / "history.jsonl",
+                now_fn=lambda: 1000,
+                notify_fn=lambda title, message: notifications.append((title, message)),
+                identity_reader=lambda _pid: None,
+            )
+            p0 = proc(command="mds", comm="mds")
+            p1 = proc(command="mds", comm="mds", read=500 * MIB, write=500 * MIB)
+            p2 = proc(command="mds", comm="mds", read=1000 * MIB, write=1000 * MIB)
+            status = {"available": True, "mib_per_second": 120, "error": ""}
+            monitor.observe({42: p0}, {42: p1}, status, seconds=10, now=1010)
+            monitor.observe({42: p1}, {42: p2}, status, seconds=10, now=1020)
+            incident = monitor.state["incidents"][0]
+            self.assertEqual("review", incident["triage"]["decision"])
+            self.assertEqual("queued", incident["prompt_status"])
+            self.assertEqual([incident["id"]], monitor.state["pending_prompts"])
+            self.assertEqual(1, len(notifications))
+            self.assertIn("needs review", notifications[0][0])
 
     def test_cool_monitor_iteration_skips_process_snapshot_and_idle_poll(self):
         with tempfile.TemporaryDirectory() as directory:
