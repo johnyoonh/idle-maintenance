@@ -146,6 +146,12 @@ def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float
     return int(match.group(1)) / 1_000_000_000 if match else 0.0
 
 
+def _known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
+    from process_review import known_process_guidance
+
+    return known_process_guidance(proc)
+
+
 class ResourceMonitor:
     """State machine for aggregate-gated, sustained per-process I/O incidents."""
 
@@ -168,10 +174,28 @@ class ResourceMonitor:
         self.prompt_fn = prompt_fn or self._prompt_default
         self.identity_reader = identity_reader
         self.state = _read_json(self.state_path)
+        health = self.state.get("health") if isinstance(self.state.get("health"), dict) else {}
+        self._last_persist_at = float(
+            health.get("last_persisted_at") or health.get("last_sample_at") or 0
+        )
 
     @property
     def interval_seconds(self) -> float:
         return max(1.0, float(self.config.get("resource_monitor_interval_seconds", 10)))
+
+    @property
+    def state_flush_seconds(self) -> float:
+        return max(
+            self.interval_seconds,
+            float(self.config.get("resource_monitor_state_flush_seconds", 30)),
+        )
+
+    @property
+    def idle_poll_seconds(self) -> float:
+        return max(
+            self.interval_seconds,
+            float(self.config.get("resource_monitor_idle_poll_seconds", 30)),
+        )
 
     def _notify_default(self, title: str, message: str) -> None:
         from maintenance_core import notify_user
@@ -182,18 +206,58 @@ class ResourceMonitor:
         import maintenance_interactive as core
         from process_review import handle_process_action, prompt_process
 
+        review_proc = dict(proc)
+        review_proc["reason"] = (
+            f"Sustained I/O incident: peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s total, "
+            f"{float(incident.get('peak_write_mib_s', 0)):.1f} MiB/s writes; {ATTRIBUTION_NOTE}"
+        )
+        review_proc["io_samples"] = [
+            {
+                "total_mib_s": float(incident.get("peak_total_mib_s", 0)),
+                "write_mib_s": float(incident.get("peak_write_mib_s", 0)),
+            }
+        ]
         action = prompt_process(
             core,
-            proc,
+            review_proc,
             float(self.config.get("process_snooze_hours", 24)),
             1,
         )
-        handle_process_action(core, proc, action, self.config)
+        handle_process_action(core, review_proc, action, self.config)
         return action
 
-    def _persist(self) -> None:
+    def _persist(self, *, force: bool = False, now: float | None = None) -> bool:
+        persisted_at = self.now_fn() if now is None else float(now)
+        elapsed = persisted_at - self._last_persist_at
+        if self._last_persist_at and not force and 0 <= elapsed < self.state_flush_seconds:
+            return False
+        health = self.state.setdefault("health", {})
+        health["last_persisted_at"] = persisted_at
         if not atomic_write_json(self.state_path, self.state):
             raise OSError(f"failed to atomically write {self.state_path}")
+        self._last_persist_at = persisted_at
+        return True
+
+    def _event_signature(self) -> tuple[Any, ...]:
+        incidents = tuple(
+            (
+                item.get("id"),
+                item.get("status"),
+                item.get("prompt_status"),
+                item.get("ended_at"),
+            )
+            for item in self.state.get("incidents", [])
+            if isinstance(item, dict)
+        )
+        prompt_health = self.state.get("prompt_health")
+        prompt_error = prompt_health.get("last_error") if isinstance(prompt_health, dict) else None
+        return (
+            tuple(sorted(self.state.get("active", {}).items())),
+            tuple(self.state.get("pending_prompts", [])),
+            bool(self.state.get("idle_armed")),
+            incidents,
+            prompt_error,
+        )
 
     def _history(self, event: str, incident: dict[str, Any], **fields: Any) -> None:
         record = {
@@ -264,6 +328,7 @@ class ResourceMonitor:
         )
         recurrence_window = float(self.config.get("resource_monitor_recurrence_seconds", 30 * 60))
         recurrence = bool(recent_recovery and now - recent_recovery <= recurrence_window)
+        guidance = _known_process_guidance(proc)
         incident_id = f"{int(now)}-{instance[:12]}"
         command = str(proc.get("command") or proc.get("comm") or "process")
         incident = {
@@ -277,7 +342,7 @@ class ResourceMonitor:
             "ended_at": None,
             "cool_samples": 0,
             "status": "active",
-            "prompt_status": "immediate" if recurrence else "queued",
+            "prompt_status": "immediate" if recurrence else ("known-background" if guidance else "queued"),
             "recurrence": recurrence,
             "system_mib_s": round(system_rate, 3),
             "peak_total_mib_s": round(max(item["total_mib_s"] for item in window), 3),
@@ -292,20 +357,37 @@ class ResourceMonitor:
                 )
             },
         }
+        if guidance:
+            incident["known_process"] = guidance
         self.state["incidents"].append(incident)
         self.state["active"][instance] = incident_id
-        if not recurrence:
+        if not recurrence and not guidance:
             self.state["pending_prompts"].append(incident_id)
-        self._history("opened", incident, recurrence=recurrence, attribution=ATTRIBUTION_NOTE)
+        self._history(
+            "opened",
+            incident,
+            recurrence=recurrence,
+            attribution=ATTRIBUTION_NOTE,
+            known_role=guidance.get("role") if guidance else None,
+        )
 
         cooldown = float(self.config.get("resource_monitor_notification_cooldown_seconds", 6 * 3600))
         last_value = self.state["notifications"].get(instance)
         last_notified = float(last_value) if last_value is not None else None
         if last_notified is None or now - last_notified >= cooldown:
-            self.notify_fn(
-                "Idle Maintenance resource incident",
-                f"{incident['process']} sustained {incident['peak_total_mib_s']:.1f} MiB/s. {ATTRIBUTION_NOTE}",
-            )
+            if guidance:
+                title = "Idle Maintenance background activity"
+                message = (
+                    f"{incident['process']} matches {guidance['role']} and sustained "
+                    f"{incident['peak_total_mib_s']:.1f} MiB/s. Default: {guidance['default_action']}"
+                )
+            else:
+                title = "Idle Maintenance resource incident"
+                message = (
+                    f"{incident['process']} sustained {incident['peak_total_mib_s']:.1f} MiB/s. "
+                    f"{ATTRIBUTION_NOTE}"
+                )
+            self.notify_fn(title, message)
             self.state["notifications"][instance] = now
             incident["notified_at"] = now
         if recurrence:
@@ -346,6 +428,9 @@ class ResourceMonitor:
         ]
 
     def _handle_idle_return(self, idle_seconds: float, now: float) -> None:
+        if not self.state.get("pending_prompts"):
+            self.state["idle_armed"] = False
+            return
         idle_threshold = float(self.config.get("return_from_away_minutes", 15)) * 60
         if idle_seconds >= idle_threshold:
             self.state["idle_armed"] = True
@@ -368,7 +453,7 @@ class ResourceMonitor:
         idle_seconds: float = 0,
         now: float | None = None,
     ) -> None:
-        """Consume one process interval and atomically persist monitor state."""
+        """Consume one interval and persist lifecycle changes immediately, heartbeats at a bounded cadence."""
         observed_at = self.now_fn() if now is None else float(now)
         elapsed = self.interval_seconds if seconds is None else float(seconds)
         available = bool(system_status.get("available"))
@@ -376,11 +461,11 @@ class ResourceMonitor:
         system_gate = float(self.config.get("system_disk_busy_mib_per_second", 50))
         aggregate_hot = available and system_rate >= system_gate
         hot_instances: set[str] = set()
-        seen_instances: set[str] = set()
+        before_events = self._event_signature()
+        previous_error = str((self.state.get("health") or {}).get("last_error") or "")
 
         for pid, proc in current.items():
             instance = process_instance_id(proc)
-            seen_instances.add(instance)
             old = previous.get(pid)
             interval = rolling_delta(old, proc, elapsed) if old else None
             window = self.state["windows"].setdefault(instance, [])
@@ -442,12 +527,16 @@ class ResourceMonitor:
 
         self._handle_idle_return(float(idle_seconds), observed_at)
         prompt_health = self.state.get("prompt_health") if isinstance(self.state.get("prompt_health"), dict) else {}
+        new_error = "" if available else str(system_status.get("error") or "iostat unavailable")
         self.state["health"] = {
             "pid": os.getpid(),
             "last_sample_at": observed_at,
             "sample_interval_seconds": self.interval_seconds,
+            "state_flush_seconds": self.state_flush_seconds,
+            "idle_poll_seconds": self.idle_poll_seconds,
+            "snapshot_mode": "aggregate-gated",
             "last_system_mib_s": system_rate if available else None,
-            "last_error": "" if available else str(system_status.get("error") or "iostat unavailable"),
+            "last_error": new_error,
             "last_prompt_error": str(prompt_health.get("last_error") or ""),
             "last_prompt_error_at": prompt_health.get("last_error_at"),
             "last_prompt_success_at": prompt_health.get("last_success_at"),
@@ -455,7 +544,8 @@ class ResourceMonitor:
             "pending_prompts": len(self.state["pending_prompts"]),
         }
         self._prune(observed_at)
-        self._persist()
+        force_persist = before_events != self._event_signature() or previous_error != new_error
+        self._persist(force=force_persist, now=observed_at)
 
 
 def acquire_single_instance(path: Path) -> Any | None:
@@ -480,6 +570,7 @@ def run_monitor(
     snapshot_provider: Callable[[], dict[int, dict[str, Any]]] | None = None,
     disk_provider: Callable[[float], dict[str, Any]] | None = None,
     idle_provider: Callable[[], float] = read_idle_seconds,
+    monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> int:
     cfg = config or load_config(os.path.dirname(__file__))
     lock_path = Path(os.path.expanduser(str(cfg.get("resource_monitor_lock_path", DEFAULT_LOCK_PATH))))
@@ -501,18 +592,40 @@ def run_monitor(
         disk = disk_provider or (
             lambda seconds: sample_disk_activity(seconds, executable="/usr/sbin/iostat")
         )
-        previous = provider()
+        previous: dict[int, dict[str, Any]] = {}
+        next_idle_poll_at = 0.0
+        cached_idle_seconds = 0.0
         while not stop:
             status = disk(monitor.interval_seconds)
-            current = provider()
+            available = bool(status.get("available"))
+            system_rate = float(status.get("mib_per_second") or 0)
+            aggregate_hot = available and system_rate >= float(
+                cfg.get("system_disk_busy_mib_per_second", 50)
+            )
+            current = provider() if aggregate_hot else {}
+
+            needs_idle_poll = bool(
+                monitor.state.get("pending_prompts") or monitor.state.get("idle_armed")
+            )
+            idle_seconds = 0.0
+            if needs_idle_poll:
+                now_mono = monotonic_fn()
+                if now_mono >= next_idle_poll_at:
+                    cached_idle_seconds = idle_provider()
+                    next_idle_poll_at = now_mono + monitor.idle_poll_seconds
+                idle_seconds = cached_idle_seconds
+            else:
+                cached_idle_seconds = 0.0
+                next_idle_poll_at = 0.0
+
             monitor.observe(
-                previous,
+                previous if aggregate_hot else {},
                 current,
                 status,
                 seconds=monitor.interval_seconds,
-                idle_seconds=idle_provider(),
+                idle_seconds=idle_seconds,
             )
-            previous = current
+            previous = current if aggregate_hot else {}
             if once:
                 break
         return 0
