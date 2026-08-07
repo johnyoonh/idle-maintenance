@@ -4,7 +4,7 @@ Idle Maintenance includes a single-instance process I/O monitor intended to surf
 
 ## Detection policy
 
-The monitor runs continuously under launchd and uses one 10-second aggregate `iostat` interval followed by one `proc_pid_rusage(RUSAGE_INFO_V2)` process snapshot. It keeps a rolling three-sample window, which produces two process-counter intervals.
+The monitor runs continuously under launchd and uses aggregate `iostat` as a gate before collecting `proc_pid_rusage(RUSAGE_INFO_V2)` process snapshots. It keeps a rolling three-sample window, which produces two process-counter intervals while aggregate disk activity is high.
 
 An incident opens only when all of these conditions hold:
 
@@ -19,24 +19,46 @@ PID reuse and counter resets discard the rolling window. An active incident reco
 
 The evidence statement is deliberately bounded: **I/O charged to the process during the sampled window; this is not definitive physical-disk attribution.** Per-process accounting can identify a useful correlation, but it cannot by itself prove which component caused physical storage traffic.
 
+## Deterministic process triage
+
+Known macOS background work is classified before a user alarm is raised. Process roles and default handling live in `process_review.py`; the shared suppress-versus-review threshold policy lives in `process_triage.py`. The live monitor, interactive process audit, and investigation prompts therefore reuse the same known-process guidance rather than rediscovering generic process identity each time.
+
+Current known groups include Spotlight/Core Spotlight, Photos/media analysis, iCloud/File Provider sync, Contacts, suggestions/knowledge indexing, Time Machine, Software Update, and selected core macOS services.
+
+A first isolated incident from a known group is still recorded in the incident ledger and JSONL history, but its notification and generic review prompt are suppressed when it remains below the routine review ceiling. The default recommendation from the known-process profile remains available in status/history and in any later escalated review.
+
+Known work escalates back to normal review when either condition is true:
+
+- the same process key or recurrence group returns within the configured recurrence window, including across a PID restart or command-fingerprint change; or
+- CPU or process I/O reaches the routine review ceiling, which defaults to 4× the ordinary configured CPU/I/O threshold.
+
+Unknown processes are never suppressed by this policy. They retain the existing notification and review behavior.
+
+The behavior can be tuned without adding process-specific automation:
+
+- `process_routine_suppression_enabled` defaults to `true`;
+- `process_routine_review_multiplier` defaults to `4.0` and is clamped to at least `1.0`.
+
+Suppression means “record the understood isolated case without interrupting the user.” It does not authorize termination, throttling, or any other corrective action.
+
 ## Notifications and review timing
 
-- Each process identity receives at most one notification every six hours.
-- The first incident is queued for review until the user returns after at least 15 minutes idle.
-- A second incident for the same process identity within 30 minutes of recovery opens the review prompt immediately.
-- Historical incidents remain in the incident ledger and JSONL history even after the live process queue changes.
+- Each process identity receives at most one notification every six hours when review is warranted.
+- A first non-suppressed incident is queued for review until the user returns after at least 15 minutes idle.
+- A recurrent incident for the same logical process within 30 minutes of recovery opens the review prompt immediately. Known recurrence groups survive PID restarts.
+- Historical and suppressed incidents remain in the incident ledger and JSONL history even after the live process queue changes.
 
-State is written atomically under `$HOME/Library/Application Support/idle-maintenance/`:
+State is written atomically under `$HOME/Library/Application Support/idle-maintenance/` with heartbeat writes throttled to a bounded cadence while lifecycle changes persist immediately:
 
-- `resource-monitor-state.json`: bounded health, active incidents, recent incident summaries, notification cooldowns, and pending prompts;
-- `resource-monitor-history.jsonl`: bounded append history for incident open, recovery, and prompt outcomes;
+- `resource-monitor-state.json`: bounded health, active incidents, recent incident summaries, notification cooldowns, pending prompts, and deterministic triage metadata;
+- `resource-monitor-history.jsonl`: bounded append history for incident open, suppression, recovery, and prompt outcomes;
 - `resource-monitor.lock`: the single-instance lock.
 
 Use `maint status` or `maint status --json` to inspect launchd health, monitor heartbeat, active incidents, queued prompts, recent incidents, and the attribution boundary.
 
 ## Process action policy
 
-Protected Apple daemons and similar helpers expose only **Investigate**, **Snooze**, and **Leave**. This includes `mediaanalysisd`, `photoanalysisd`, `contactsd`, `corespotlightd`, `mds`, `mdworker` variants, `fileproviderd`, and related indexing or cloud helpers.
+Known Apple daemons and similar helpers expose only **Investigate**, **Snooze**, and **Leave** when they do reach review. Their deterministic guidance also supplies the likely role and default handling so the investigation begins from known context.
 
 The main Mail and Shortcuts application processes may expose **Quit App**. A quit action:
 
@@ -58,7 +80,7 @@ The unattended monitor never runs:
 - process throttling;
 - automatic termination.
 
-Investigation prompts provide only bounded, rootless observations. Any deeper diagnosis remains an explicit, interactive decision outside the monitor.
+Investigation prompts provide only bounded, rootless observations. For a recognized macOS group they also include the known role, default handling, and deterministic triage reason. Any deeper diagnosis remains an explicit, interactive decision outside the monitor.
 
 ## Balanced macOS settings
 

@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from idle_config import APP_SUPPORT_DIR, atomic_write_json, load_config, sample_disk_activity
 import process_identity as identity
+from process_triage import triage_process
 
 MIB = 1024 * 1024
 STATE_SCHEMA = 1
@@ -207,8 +208,11 @@ class ResourceMonitor:
         from process_review import handle_process_action, prompt_process
 
         review_proc = dict(proc)
+        review_proc["resource_triage"] = incident.get("triage")
+        triage_reason = (incident.get("triage") or {}).get("reason")
         review_proc["reason"] = (
-            f"Sustained I/O incident: peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s total, "
+            f"{triage_reason + ' ' if triage_reason else ''}Sustained I/O incident: "
+            f"peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s total, "
             f"{float(incident.get('peak_write_mib_s', 0)):.1f} MiB/s writes; {ATTRIBUTION_NOTE}"
         )
         review_proc["io_samples"] = [
@@ -318,23 +322,46 @@ class ResourceMonitor:
         system_rate: float,
         now: float,
     ) -> dict[str, Any]:
+        process_key = proc.get("process_key") or identity.key(proc)
+        guidance = _known_process_guidance(proc)
+        recurrence_group = guidance.get("recurrence_group") if guidance else None
+
+        def same_logical_process(item: dict[str, Any]) -> bool:
+            if item.get("process_identity") == instance or item.get("process_key") == process_key:
+                return True
+            previous_guidance = item.get("known_process") if isinstance(item.get("known_process"), dict) else {}
+            return bool(
+                recurrence_group
+                and previous_guidance.get("recurrence_group") == recurrence_group
+            )
+
         recent_recovery = max(
             (
                 float(item.get("ended_at", 0) or 0)
                 for item in self.state["incidents"]
-                if item.get("process_identity") == instance and item.get("ended_at")
+                if same_logical_process(item) and item.get("ended_at")
             ),
             default=0.0,
         )
         recurrence_window = float(self.config.get("resource_monitor_recurrence_seconds", 30 * 60))
         recurrence = bool(recent_recovery and now - recent_recovery <= recurrence_window)
-        guidance = _known_process_guidance(proc)
+        peak_total = max(item["total_mib_s"] for item in window)
+        peak_write = max(item["write_mib_s"] for item in window)
+        resource_triage = triage_process(
+            proc,
+            guidance,
+            self.config,
+            peak_total_mib_s=peak_total,
+            peak_write_mib_s=peak_write,
+            recurrence=recurrence,
+        )
+        suppressed = resource_triage["decision"] == "suppress"
         incident_id = f"{int(now)}-{instance[:12]}"
         command = str(proc.get("command") or proc.get("comm") or "process")
         incident = {
             "id": incident_id,
             "process_identity": instance,
-            "process_key": proc.get("process_key") or identity.key(proc),
+            "process_key": process_key,
             "process": os.path.basename(str(proc.get("comm") or command)) or "process",
             "pid": int(proc["pid"]),
             "started_at": now,
@@ -342,11 +369,12 @@ class ResourceMonitor:
             "ended_at": None,
             "cool_samples": 0,
             "status": "active",
-            "prompt_status": "immediate" if recurrence else ("known-background" if guidance else "queued"),
+            "prompt_status": "immediate" if recurrence else ("suppressed" if suppressed else "queued"),
             "recurrence": recurrence,
+            "triage": resource_triage,
             "system_mib_s": round(system_rate, 3),
-            "peak_total_mib_s": round(max(item["total_mib_s"] for item in window), 3),
-            "peak_write_mib_s": round(max(item["write_mib_s"] for item in window), 3),
+            "peak_total_mib_s": round(peak_total, 3),
+            "peak_write_mib_s": round(peak_write, 3),
             "window_bytes": int(sum(item["total_bytes"] for item in window)),
             "attribution": ATTRIBUTION_NOTE,
             "process_snapshot": {
@@ -361,7 +389,7 @@ class ResourceMonitor:
             incident["known_process"] = guidance
         self.state["incidents"].append(incident)
         self.state["active"][instance] = incident_id
-        if not recurrence and not guidance:
+        if not recurrence and not suppressed:
             self.state["pending_prompts"].append(incident_id)
         self._history(
             "opened",
@@ -369,17 +397,29 @@ class ResourceMonitor:
             recurrence=recurrence,
             attribution=ATTRIBUTION_NOTE,
             known_role=guidance.get("role") if guidance else None,
+            triage_decision=resource_triage["decision"],
+            triage_classification=resource_triage["classification"],
         )
+
+        if suppressed:
+            self._history(
+                "suppressed",
+                incident,
+                reason=resource_triage["reason"],
+                recurrence_group=recurrence_group,
+            )
+            return incident
 
         cooldown = float(self.config.get("resource_monitor_notification_cooldown_seconds", 6 * 3600))
         last_value = self.state["notifications"].get(instance)
         last_notified = float(last_value) if last_value is not None else None
         if last_notified is None or now - last_notified >= cooldown:
             if guidance:
-                title = "Idle Maintenance background activity"
+                title = "Idle Maintenance background activity needs review"
                 message = (
                     f"{incident['process']} matches {guidance['role']} and sustained "
-                    f"{incident['peak_total_mib_s']:.1f} MiB/s. Default: {guidance['default_action']}"
+                    f"{incident['peak_total_mib_s']:.1f} MiB/s. {resource_triage['reason']} "
+                    f"Default: {guidance['default_action']}"
                 )
             else:
                 title = "Idle Maintenance resource incident"
@@ -542,6 +582,11 @@ class ResourceMonitor:
             "last_prompt_success_at": prompt_health.get("last_success_at"),
             "active_incidents": len(self.state["active"]),
             "pending_prompts": len(self.state["pending_prompts"]),
+            "suppressed_incidents": sum(
+                1
+                for incident in self.state["incidents"]
+                if incident.get("status") == "active" and incident.get("prompt_status") == "suppressed"
+            ),
         }
         self._prune(observed_at)
         force_persist = before_events != self._event_signature() or previous_error != new_error

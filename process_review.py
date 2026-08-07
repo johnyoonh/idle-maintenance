@@ -12,6 +12,7 @@ from typing import Any
 from idle_config import APP_SUPPORT_DIR, atomic_write_json, keep_entry_is_active, load_config, next_keep_delay_days
 import process_identity as identity
 from process_sampling import get_candidate_processes
+from process_triage import triage_process
 
 _LOCK = None
 ATTRIBUTION_NOTE = (
@@ -23,42 +24,49 @@ KNOWN_PROCESS_PROFILES = (
     {
         "names": {"mds", "mds_stores", "corespotlightd"},
         "prefixes": ("mdworker", "corespotlight"),
+        "recurrence_group": "spotlight-indexing",
         "role": "Spotlight/Core Spotlight indexing",
         "default_action": "Leave it running. If high usage keeps recurring after indexing should settle, inspect recent indexing churn or excluded paths instead of terminating the daemon.",
     },
     {
         "names": {"mediaanalysisd", "photoanalysisd"},
         "prefixes": ("mediaanalysis", "photoanalysis"),
+        "recurrence_group": "photos-analysis",
         "role": "Photos and media analysis",
         "default_action": "Leave it running while imports, face/object analysis, or photo-library synchronization settle; investigate only if the load remains sustained or repeatedly returns.",
     },
     {
         "names": {"fileproviderd", "bird", "cloudd"},
         "prefixes": ("fileprovider",),
+        "recurrence_group": "cloud-sync",
         "role": "iCloud/File Provider synchronization",
         "default_action": "Leave it running and check the relevant sync provider or backlog if activity persists. Do not kill the sync daemon as a first response.",
     },
     {
         "names": {"contactsd"},
         "prefixes": ("contacts",),
+        "recurrence_group": "contacts-sync",
         "role": "Contacts synchronization and indexing",
         "default_action": "Leave it running. If the activity repeatedly returns, inspect account synchronization state before considering application-level changes.",
     },
     {
         "names": {"suggestd", "knowledge-agent"},
         "prefixes": (),
+        "recurrence_group": "suggestions-indexing",
         "role": "Apple suggestions/knowledge indexing",
         "default_action": "Leave it running unless sustained measurements keep recurring; prefer identifying the source data or recent system activity over terminating the service.",
     },
     {
         "names": {"backupd", "backupd-helper"},
         "prefixes": (),
+        "recurrence_group": "time-machine",
         "role": "Time Machine backup",
         "default_action": "Allow an expected backup to finish. If activity is unexpected or repeatedly stalls, inspect Time Machine status and the backup destination rather than killing backupd.",
     },
     {
         "names": {"softwareupdated", "storedownloadd", "installd"},
         "prefixes": (),
+        "recurrence_group": "software-update",
         "role": "macOS software download/update installation",
         "default_action": "Allow an expected update to finish. If activity is recurrent without visible progress, inspect Software Update state rather than terminating the system service.",
     },
@@ -97,6 +105,7 @@ def known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
         if name in profile["names"] or name.startswith(profile["prefixes"]):
             return {
                 "name": name,
+                "recurrence_group": str(profile.get("recurrence_group") or f"process:{name}"),
                 "role": str(profile["role"]),
                 "default_action": str(profile["default_action"]),
                 "policy": "observe-first",
@@ -104,17 +113,9 @@ def known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-def should_suppress_process_alert(proc: dict[str, Any]) -> bool:
-    """Suppress low-confidence long-running-only alerts for known macOS services."""
-    if not known_process_guidance(proc):
-        return False
-    reason = str(proc.get("reason") or "")
-    if not reason:
-        return False
-    strong_signals = ("CPU stayed at or above", "I/O charged to the process")
-    if any(signal_text in reason for signal_text in strong_signals):
-        return False
-    return reason.startswith("Running ") or " • Running " in reason
+def should_suppress_process_alert(proc: dict[str, Any], config: dict[str, Any] | None = None) -> bool:
+    """Suppress understood macOS work unless recurrence/extreme use warrants review."""
+    return triage_process(proc, known_process_guidance(proc), config)["decision"] == "suppress"
 
 
 def process_action_policy(proc: dict[str, Any]) -> str:
@@ -155,6 +156,9 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
     context = _known_context(proc)
     if context:
         detail += "\n" + "\n".join(context)
+    resource_triage = proc.get("resource_triage")
+    if isinstance(resource_triage, dict):
+        detail += f"\nTriage: {resource_triage.get('decision', 'review')} — {resource_triage.get('reason', '')}"
     policy = process_action_policy(proc)
     command = [
         "swift",
@@ -184,7 +188,10 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
 
 
 def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any] | None = None) -> str:
-    del core, config
+    del core
+    guidance = known_process_guidance(proc)
+    stored_triage = proc.get("resource_triage")
+    resource_triage = stored_triage if isinstance(stored_triage, dict) else triage_process(proc, guidance, config)
     lines = [
         "Investigate this high-impact macOS process and help me decide what to do.",
         "",
@@ -201,7 +208,9 @@ def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any]
     ]
     context = _known_context(proc)
     if context:
-        lines.extend(["Known macOS context:", *[f"- {item}" for item in context], ""])
+        lines.extend(["Known macOS context:", *[f"- {item}" for item in context]])
+        lines.append(f"- Deterministic triage: {resource_triage['decision']} ({resource_triage['reason']})")
+        lines.append("")
     lines.extend(
         [
             "Process details:",
@@ -278,10 +287,14 @@ def run_process_audit(core: Any, config: dict[str, Any], prompt_budget: int | No
         limit = min(limit, max(0, int(prompt_budget)))
     if limit <= 0:
         return True, 0
-    candidates = [
-        proc for proc in get_candidate_processes(config)
-        if not should_suppress_process_alert(proc)
-    ]
+    candidates = []
+    for proc in get_candidate_processes(config):
+        resource_triage = triage_process(proc, known_process_guidance(proc), config)
+        if resource_triage["decision"] == "suppress":
+            continue
+        reviewed = dict(proc)
+        reviewed["resource_triage"] = resource_triage
+        candidates.append(reviewed)
     by_key = {proc["process_key"]: proc for proc in candidates}
     queue = core.load_json(core.PROCESS_QUEUE_PATH)
     queue = queue if isinstance(queue, list) else []
@@ -387,6 +400,9 @@ def install(core: Any) -> None:
     core.process_action_policy = process_action_policy
     core.known_process_guidance = known_process_guidance
     core.should_suppress_process_alert = should_suppress_process_alert
+    core.triage_process = lambda proc, config=None, **kwargs: triage_process(
+        proc, known_process_guidance(proc), config, **kwargs
+    )
     core.prompt_process = lambda proc, snooze_hours=24, keep_days=1: prompt_process(
         core, proc, snooze_hours, keep_days
     )
