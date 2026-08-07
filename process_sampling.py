@@ -57,9 +57,14 @@ def get_candidate_processes(config, snapshot_provider=None, sleep_fn=time.sleep)
             reasons.append(
                 f"CPU stayed at or above {cpu_limit:.1f}% for {cpu_count} samples over {cpu_times[-1]:.0f}s"
             )
-        if initial.get("elapsed_seconds", 0) >= long_seconds and initial.get("cpu", 0) >= long_cpu:
+        if (
+            initial.get("elapsed_seconds", 0) >= long_seconds
+            and len(cpu_values) == cpu_count
+            and all(value >= long_cpu for value in cpu_values)
+        ):
             reasons.append(
-                f"Running {initial.get('etime')} (limit {long_seconds // 3600}h) with CPU at or above {long_cpu:.1f}%"
+                f"Running {initial.get('etime')} (limit {long_seconds // 3600}h) with CPU at or above "
+                f"{long_cpu:.1f}% across {cpu_count} samples"
             )
         io_rates = []
         total_bytes = 0
