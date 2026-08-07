@@ -12,6 +12,7 @@ from typing import Any
 from idle_config import APP_SUPPORT_DIR, atomic_write_json, keep_entry_is_active, load_config, next_keep_delay_days
 import process_identity as identity
 from process_sampling import get_candidate_processes
+from process_triage import candidates_requiring_review, routine_process_profile, triage_process
 
 _LOCK = None
 ATTRIBUTION_NOTE = (
@@ -56,7 +57,7 @@ def _display(proc: dict[str, Any]) -> str:
 def process_action_policy(proc: dict[str, Any]) -> str:
     """Return protected, graceful-quit, or review-only for a process instance."""
     name = _base_name(proc)
-    if name in PROTECTED_APPLE_DAEMONS or name.startswith(PROTECTED_PREFIXES):
+    if routine_process_profile(proc) is not None or name in PROTECTED_APPLE_DAEMONS or name.startswith(PROTECTED_PREFIXES):
         return "protected"
     command = str(proc.get("command") or "")
     if name == "mail" and ".app/Contents/MacOS/Mail" in command:
@@ -78,6 +79,13 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
             f"{x['total_mib_s']:.1f} MiB/s ({x['write_mib_s']:.1f} write)" for x in rates
         )
         detail += f"\n{ATTRIBUTION_NOTE}"
+    profile = routine_process_profile(proc)
+    if profile:
+        detail += f"\nKnown macOS role: {profile['label']}"
+        detail += f"\nDefault action: {profile['default_action']}"
+    resource_triage = proc.get("resource_triage")
+    if isinstance(resource_triage, dict):
+        detail += f"\nTriage: {resource_triage.get('decision', 'review')} — {resource_triage.get('reason', '')}"
     policy = process_action_policy(proc)
     try:
         result = subprocess.check_output(
@@ -104,7 +112,20 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
 
 
 def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any] | None = None) -> str:
-    del core, config
+    del core
+    profile = routine_process_profile(proc)
+    stored_triage = proc.get("resource_triage")
+    triage = stored_triage if isinstance(stored_triage, dict) else triage_process(proc, config or {})
+    known_context = []
+    if profile:
+        known_context = [
+            "",
+            "Known macOS context:",
+            f"- Family: {profile['label']}",
+            f"- Normal causes: {profile['normal_causes']}",
+            f"- Default action: {profile['default_action']}",
+            f"- Current deterministic triage: {triage['decision']} ({triage['reason']})",
+        ]
     return "\n".join(
         [
             "Investigate this high-impact macOS process and help me decide what to do.",
@@ -117,6 +138,7 @@ def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any]
             "3. Which rootless observations would distinguish the likely causes.",
             "4. Whether a user-initiated graceful quit is appropriate.",
             "5. Recommended next action.",
+            *known_context,
             "",
             "Process details:",
             f"- PID: {proc['pid']}",
@@ -191,7 +213,7 @@ def run_process_audit(core: Any, config: dict[str, Any], prompt_budget: int | No
         limit = min(limit, max(0, int(prompt_budget)))
     if limit <= 0:
         return True, 0
-    candidates = get_candidate_processes(config)
+    candidates = candidates_requiring_review(get_candidate_processes(config), config)
     by_key = {proc["process_key"]: proc for proc in candidates}
     queue = core.load_json(core.PROCESS_QUEUE_PATH)
     queue = queue if isinstance(queue, list) else []
@@ -295,6 +317,7 @@ def install(core: Any) -> None:
     core.get_process_snapshot = lambda config: identity.snapshot(config)
     core.get_candidate_processes = get_candidate_processes
     core.process_action_policy = process_action_policy
+    core.process_triage = lambda proc, config=None, **kwargs: triage_process(proc, config, **kwargs)
     core.prompt_process = lambda proc, snooze_hours=24, keep_days=1: prompt_process(
         core, proc, snooze_hours, keep_days
     )
