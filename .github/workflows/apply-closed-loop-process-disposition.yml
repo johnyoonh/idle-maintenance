@@ -58,3 +58,5 @@ jobs:
           git add -A
           git commit -m "feat: add closed-loop process dispositions"
           git push origin HEAD:chatgpt/closed-loop-process-disposition
+
+# Retriggered after the complete validated archive was staged.
