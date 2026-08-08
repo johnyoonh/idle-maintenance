@@ -118,7 +118,7 @@ def ask_review(base_dir: str, payload: dict[str, Any]) -> str:
     """Prefer the persistent UI, with a compatibility fallback if it cannot start."""
     try:
         return get_session(base_dir).ask(payload)
-    except RuntimeError:
+    except (RuntimeError, OSError, subprocess.SubprocessError):
         return legacy_prompt(base_dir, payload)
 
 
