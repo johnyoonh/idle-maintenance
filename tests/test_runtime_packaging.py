@@ -1,7 +1,14 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = ("maint.py", "shortcut_review.py", "maintenance_status_extended.py")
+REQUIRED = (
+    "maint.py",
+    "shortcut_review.py",
+    "maintenance_status_extended.py",
+    "process_triage.py",
+    "prompt_session.py",
+    "review_ui.py",
+)
 
 
 def test_review_runtime_is_packaged_for_app_and_script_deployments():
