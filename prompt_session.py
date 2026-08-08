@@ -16,7 +16,7 @@ class PromptSession:
         self.base_dir = base_dir
         self.runner = runner
         self.process: subprocess.Popen[str] | None = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     @property
     def script_path(self) -> str:
