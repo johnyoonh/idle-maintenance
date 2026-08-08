@@ -54,6 +54,17 @@ class PromptSessionTests(unittest.TestCase):
             session.ask({"name": "one", "path": "/one"})
         self.assertIsNone(session.process)
 
+    def test_launch_failure_falls_back_to_legacy_prompt(self):
+        with (
+            patch("prompt_session.get_session") as get_session,
+            patch("prompt_session.legacy_prompt", return_value="KEEP") as legacy,
+        ):
+            get_session.return_value.ask.side_effect = OSError("swift unavailable")
+            result = prompt_session.ask_review("/repo", {"name": "one", "path": "/one"})
+
+        self.assertEqual(result, "KEEP")
+        legacy.assert_called_once()
+
 
 class ReviewUiTests(unittest.TestCase):
     def test_io_trigger_does_not_present_zero_cpu_as_the_reason(self):
@@ -121,6 +132,23 @@ class ReviewUiTests(unittest.TestCase):
             return review_ui._pending_app_reviews(core)
 
         self.assertEqual(active_main_frame(), 2)
+
+    def test_planned_app_count_is_included_in_run_budget(self):
+        core = SimpleNamespace(
+            BASE_DIR="/repo",
+            DEFAULT_MAX_PROMPTS=5,
+            QUEUE_PATH="/queue.json",
+            WHITELIST_PATH="/whitelist.json",
+            load_json=lambda path: [],
+            load_custom_whitelist=lambda path: {},
+            queue_item_is_snoozed=lambda item, hours: item.get("path") == "/two.app",
+        )
+        config = {"max_prompts": 5, "app_snooze_hours": 720}
+        output = "/one.app|2026-01-01\n/two.app|2026-01-01\n/three.app|2026-01-01\n"
+        with patch("review_ui.subprocess.check_output", return_value=output):
+            pending = review_ui._planned_app_reviews(core, config, process_pending=2, prompt_budget=5)
+
+        self.assertEqual(pending, 2)
 
 
 if __name__ == "__main__":
