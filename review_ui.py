@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import inspect
+import os
+import subprocess
 import time
 from typing import Any
 
@@ -28,13 +30,11 @@ def process_headline(proc: dict[str, Any]) -> str:
     rates = proc.get("io_samples")
     if isinstance(rates, list) and rates:
         totals = []
-        writes = []
         for rate in rates:
             if not isinstance(rate, dict):
                 continue
             try:
                 totals.append(float(rate.get("total_mib_s", 0) or 0))
-                writes.append(float(rate.get("write_mib_s", 0) or 0))
             except (TypeError, ValueError):
                 continue
         if totals and max(totals) > 0:
@@ -106,7 +106,7 @@ def prompt_process(
 
 
 def _pending_app_reviews(core: Any) -> int:
-    """Read the active maintenance main-loop state without changing core semantics."""
+    """Read the active maintenance app-loop state without changing core semantics."""
     frame = inspect.currentframe()
     try:
         frame = frame.f_back if frame else None
@@ -135,6 +135,47 @@ def _pending_app_reviews(core: Any) -> int:
     return 0
 
 
+def _planned_app_reviews(core: Any, config: dict[str, Any], process_pending: int, prompt_budget: int | None) -> int:
+    """Count app approvals expected after the process stage within this run's budget."""
+    if prompt_budget is None:
+        return 0
+    remaining_budget = max(0, int(prompt_budget) - max(0, int(process_pending)))
+    app_limit = min(
+        max(0, int(config.get("max_prompts", core.DEFAULT_MAX_PROMPTS))),
+        remaining_budget,
+    )
+    if app_limit <= 0:
+        return 0
+
+    auditor_path = os.path.join(core.BASE_DIR, "app_auditor.py")
+    try:
+        stale_output = subprocess.check_output(["/usr/bin/python3", auditor_path], text=True).splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return 0
+
+    stale_apps = []
+    for line in stale_output:
+        line = line.strip()
+        if not line:
+            continue
+        stale_apps.append(line.split("|", 1)[0] if "|" in line else line)
+
+    queue = core.load_json(core.QUEUE_PATH)
+    if not isinstance(queue, list):
+        queue = []
+    whitelist = core.load_custom_whitelist(core.WHITELIST_PATH)
+    queue = [item for item in queue if isinstance(item, dict) and item.get("path") in stale_apps]
+    existing = {item.get("path") for item in queue}
+    for app in stale_apps:
+        if app not in existing and not keep_entry_is_active(config, whitelist.get(app)):
+            queue.append({"path": app, "last_prompted": 0})
+    queue.sort(key=lambda item: item.get("last_prompted", 0))
+
+    snooze = max(0.0, float(config.get("app_snooze_hours", 720)))
+    eligible = sum(1 for item in queue if not core.queue_item_is_snoozed(item, snooze))
+    return min(app_limit, eligible)
+
+
 def prompt_app(
     core: Any,
     app_path: str,
@@ -144,7 +185,7 @@ def prompt_app(
     keep_days: float = 60,
 ) -> str:
     payload = {
-        "name": __import__("os").path.basename(app_path),
+        "name": os.path.basename(app_path),
         "path": app_path,
         "closeOnUnfocus": bool(close_on_unfocus),
         "mode": "app",
@@ -166,7 +207,7 @@ def run_process_audit(
     config: dict[str, Any],
     prompt_budget: int | None = None,
 ) -> tuple[bool, int]:
-    """Process audit with exact pending counts for the active review stage."""
+    """Process audit with an exact pending count for the complete current run."""
     limit = int(config.get("process_max_prompts", core.DEFAULT_MAX_PROMPTS))
     if prompt_budget is not None:
         limit = min(limit, max(0, int(prompt_budget)))
@@ -214,7 +255,9 @@ def run_process_audit(
         for item in queue
         if by_key.get(item.get("process_key")) and not core.queue_item_is_snoozed(item, snooze)
     ]
-    pending_total = min(limit, len(reviewable))
+    process_pending = min(limit, len(reviewable))
+    app_pending = _planned_app_reviews(core, config, process_pending, prompt_budget)
+    run_pending = process_pending + app_pending
 
     for item in queue:
         if done >= limit:
@@ -230,7 +273,7 @@ def run_process_audit(
             snooze,
             keep_days,
             config=config,
-            pending=max(1, pending_total - done),
+            pending=max(1, run_pending - done),
         )
         if action == "QUIT":
             core.save_json(core.PROCESS_QUEUE_PATH, current)
