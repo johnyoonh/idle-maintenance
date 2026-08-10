@@ -58,8 +58,8 @@ DEFAULT_CONFIG = {
     "return_from_away_minutes": 15,
     "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",
     "return_flashcard_refresh_command": f"{LOCAL_BIN_DIR}/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
-    "return_handoff_command": "open -a Flow",
-    "return_handoff_delay_seconds": 90,
+    "return_focus_command": ["open", "hammerspoon://resumerouter"],
+    "return_handoff_command": [],
     "storage_cleanup": {
         "enabled": True,
         "dry_run": False,

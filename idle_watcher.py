@@ -6,7 +6,7 @@ import sys
 import time
 
 from idle_config import APP_SUPPORT_DIR, get_handoff_app, get_handoff_url, load_config
-from shortcut_review import render_result, run_shortcut_review
+from shortcut_review import normalize_command
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = APP_SUPPORT_DIR
@@ -22,22 +22,36 @@ def get_idle_time_seconds():
 def trigger_maintenance(
     *,
     command_runner=subprocess.run,
-    shortcut_runner=run_shortcut_review,
 ):
-    """Run the optional away-return review flow in a fixed, observable order."""
+    """Finish interactive reviews, then delegate focus to the resume router."""
     interactive_script = os.path.join(BASE_DIR, "maintenance_interactive.py")
     child_env = os.environ.copy()
     child_env["IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW"] = "1"
     command_runner(["/usr/bin/python3", interactive_script], check=False, env=child_env)
 
     config = load_config(BASE_DIR)
-    result = shortcut_runner(config)
-    if not result.get("ok"):
-        print(render_result(result), file=sys.stderr)
+    focus_command = normalize_command(
+        config.get("return_focus_command") or config.get("return_handoff_command")
+    )
+    focus_error = ""
+    focus_returncode = 127
+    if focus_command:
+        try:
+            focus_result = command_runner(focus_command, check=False)
+            focus_returncode = int(focus_result.returncode)
+        except (OSError, subprocess.SubprocessError) as error:
+            focus_error = str(error)
+    if focus_returncode == 0:
+        return {
+            "ok": True,
+            "command": focus_command,
+            "returncode": 0,
+            "fallback": False,
+            "error": "",
+        }
 
-    # Only hand off focus after the shortcut review finishes. `open` can return
-    # before the target app finishes activating, so launching it first can hide
-    # a shortcut popup that was created immediately afterward.
+    # Preserve the existing handoff as a fail-safe when Hammerspoon or the
+    # configured coordinator cannot be launched.
     target_url = get_handoff_url(config)
     if target_url:
         command_runner(["open", target_url], check=False)
@@ -45,7 +59,13 @@ def trigger_maintenance(
         target_app = get_handoff_app(config)
         if target_app:
             command_runner(["open", "-a", target_app], check=False)
-    return result
+    return {
+        "ok": False,
+        "command": focus_command,
+        "returncode": focus_returncode,
+        "fallback": True,
+        "error": focus_error or f"resume focus exited {focus_returncode}",
+    }
 
 
 def is_pid_running(pid):

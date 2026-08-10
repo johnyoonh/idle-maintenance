@@ -38,9 +38,8 @@ def away_return_review_status(
 
     idle_seconds = max(0.0, float(config.get("idle_threshold_minutes", 10))) * 60
     cooldown_seconds = max(0.0, float(config.get("post_trigger_cooldown_seconds", 3600)))
-    refresh = normalize_command(config.get("return_flashcard_refresh_command"), root)
-    popup = normalize_command(
-        config.get("return_shortcut_popup_command") or config.get("shortcut_review_command"),
+    focus = normalize_command(
+        config.get("return_focus_command") or config.get("return_handoff_command"),
         root,
     )
     return {
@@ -51,9 +50,8 @@ def away_return_review_status(
         "idle_threshold_seconds": idle_seconds,
         "return_idle_below_seconds": 30,
         "cooldown_seconds": cooldown_seconds,
-        "shortcut_refresh_configured": bool(refresh),
-        "shortcut_popup_configured": bool(popup),
-        "refresh_then_popup": bool(refresh and popup),
+        "resume_focus_configured": bool(focus),
+        "resume_focus_command": focus,
     }
 
 
@@ -68,9 +66,9 @@ def render_text(status: dict[str, Any]) -> str:
             f"cooldown {watcher['cooldown_seconds'] / 60:g} min"
         ),
         (
-            "- Shortcut review: refresh focused content, then open popup"
-            if watcher["refresh_then_popup"]
-            else "- Shortcut review: incomplete command configuration"
+            "- Resume focus: Hammerspoon context router configured"
+            if watcher["resume_focus_configured"]
+            else "- Resume focus: no coordinator command configured; legacy fallback only"
         ),
     ]
     if watcher.get("error"):

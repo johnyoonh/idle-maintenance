@@ -229,6 +229,13 @@ These files are retained for manual/legacy use:
 
 They are not the normal background maintenance path. `com.user.idle_maintenance.plist` is kept as a disabled legacy sample only. Opening the menu-bar app does not start the legacy watcher; use **Start / Restart Legacy Watcher** explicitly when needed.
 
+After interactive reviews, the watcher invokes the configured context router
+(`open hammerspoon://resumerouter` by default). Hammerspoon delegates task
+ranking to TaskForge/wiki-automation, browser ranking to TabMoa, and note
+selection to Obsidian-aware handlers. If the router cannot launch, the existing
+`handoff_url` or `handoff_app` remains the fallback. Automatic returns do not
+open the shortcut-review popup; use `maint shortcuts` for that manual review.
+
 The legacy watcher reads configuration from the first available file in this order:
 
 ```bash

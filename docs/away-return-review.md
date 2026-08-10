@@ -1,6 +1,6 @@
 # Resource and shortcut review surfaces
 
-Idle Maintenance keeps three review paths separate so a background resource monitor does not become a general content automation service.
+Idle Maintenance keeps review paths separate so a background resource monitor does not become a general content automation service.
 
 ## Resource Activity menu
 
@@ -41,9 +41,25 @@ Default policy:
 - arm after more than 10 minutes idle;
 - trigger when idle falls below 30 seconds after return;
 - require one hour between triggers;
-- run interactive maintenance and the handoff action;
-- refresh shortcut content, then open the shortcut review popup.
+- run interactive app/process maintenance;
+- invoke `open hammerspoon://resumerouter` as the final UI;
+- fall back to the configured handoff URL or app if the coordinator cannot launch.
+
+The Hammerspoon coordinator asks wiki-automation for the highest-ranked
+TaskForge task. A TaskNote may save an exact digital work target using
+`resume_required`, `resume_kind`, `resume_target`, `resume_app`,
+`resume_profile`, `resume_label`, and `resume_confidence`. Exact mappings open
+immediately; inferred or missing mappings are confirmed in Hammerspoon and the
+selection is recorded back to the TaskNote.
+
+Examples include a tuition URL, a direct subscription-email or draft link, a
+Canvas course page, or a saved interview-preparation conversation. Public docs
+and tests use synthetic domains and profile names; real targets remain in the
+private vault.
 
 Starting the watcher intentionally runs one review immediately. `maint status` reports whether this optional watcher is running and displays its current thresholds.
 
-The signed resource-monitor LaunchAgent remains process-focused. It does not export shortcut content, write to a vault, or invoke the optional away-return watcher.
+`maint shortcuts` remains the manual refresh-and-review workflow. The automatic
+return path no longer opens that separate popup, so it cannot steal focus from
+the selected work target. The signed resource-monitor LaunchAgent remains
+process-focused and does not write to the vault or invoke the optional watcher.

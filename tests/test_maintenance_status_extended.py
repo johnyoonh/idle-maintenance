@@ -11,8 +11,7 @@ class MaintenanceStatusExtendedTests(unittest.TestCase):
         return {
             "idle_threshold_minutes": 10,
             "post_trigger_cooldown_seconds": 3600,
-            "return_flashcard_refresh_command": ["kb", "export-srs"],
-            "return_shortcut_popup_command": ["kb", "popup"],
+            "return_focus_command": ["open", "hammerspoon://resumerouter"],
         }
 
     def test_away_return_status_reports_running_policy(self):
@@ -26,7 +25,7 @@ class MaintenanceStatusExtendedTests(unittest.TestCase):
         self.assertEqual(status["idle_threshold_seconds"], 600)
         self.assertEqual(status["return_idle_below_seconds"], 30)
         self.assertEqual(status["cooldown_seconds"], 3600)
-        self.assertTrue(status["refresh_then_popup"])
+        self.assertTrue(status["resume_focus_configured"])
 
     def test_optional_watcher_does_not_change_core_health(self):
         base_status = {
@@ -45,7 +44,7 @@ class MaintenanceStatusExtendedTests(unittest.TestCase):
         self.assertFalse(status["away_return_review"]["running"])
         self.assertTrue(extended._healthy(status))
         self.assertIn("Away-return review (optional)", status["text"])
-        self.assertIn("refresh focused content, then open popup", status["text"])
+        self.assertIn("Hammerspoon context router configured", status["text"])
 
 
 if __name__ == "__main__":
