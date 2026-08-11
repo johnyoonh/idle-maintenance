@@ -146,6 +146,33 @@ class ResourceMonitorTests(unittest.TestCase):
         self.observe({42: p0}, {42: p1}, system=49.9)
         self.observe({42: p1}, {42: p2}, system=49.9)
         self.assertEqual(self.monitor.state["incidents"], [])
+        self.assertEqual(self.monitor._windows, {})
+
+    def test_process_churn_keeps_transient_windows_bounded(self):
+        for index in range(2_000):
+            pid = 1_000 + index
+            before = proc(pid=pid, start=10_000 + index)
+            after = proc(pid=pid, start=10_000 + index, read=MIB)
+            self.observe({pid: before}, {pid: after})
+            self.assertLessEqual(len(self.monitor._windows), 1)
+
+        self.observe({}, {})
+
+        self.assertEqual(self.monitor._windows, {})
+        self.assertEqual(self.monitor.state["health"]["tracked_windows"], 0)
+        self.assertEqual(self.monitor.state["health"]["sampled_processes"], 0)
+
+    def test_cool_sample_clears_transient_windows(self):
+        p0 = proc()
+        p1 = proc(read=MIB)
+        p2 = proc(read=2 * MIB)
+        self.observe({42: p0}, {42: p1})
+        self.assertEqual(len(self.monitor._windows), 1)
+
+        self.observe({42: p1}, {42: p2}, system=10)
+
+        self.assertEqual(self.monitor._windows, {})
+        self.assertEqual(self.monitor.state["health"]["tracked_windows"], 0)
 
     def test_sustained_threshold_and_minimum_window_open_incident(self):
         _current, incident = self.open_incident()
@@ -154,6 +181,7 @@ class ResourceMonitorTests(unittest.TestCase):
         self.assertIn("not definitive physical-disk attribution", incident["attribution"])
         self.assertEqual(len(self.notifications), 1)
         self.assertEqual(self.monitor.state["pending_prompts"], [incident["id"]])
+        self.assertEqual(self.monitor._windows, {})
 
     def test_recovery_requires_six_cool_samples(self):
         current, incident = self.open_incident()
@@ -208,6 +236,7 @@ class ResourceMonitorTests(unittest.TestCase):
         self.open_incident()
         loaded = json.loads(self.state.read_text())
         self.assertEqual(loaded["schema_version"], 1)
+        self.assertNotIn("windows", loaded)
         self.assertFalse(any(path.suffix == ".tmp" for path in self.root.iterdir()))
         for index in range(10):
             append_bounded_jsonl(self.history, {"index": index}, 5)
@@ -218,6 +247,35 @@ class ResourceMonitorTests(unittest.TestCase):
         ]
         self.monitor._prune(self.clock)
         self.assertEqual([item["id"] for item in self.monitor.state["incidents"]], ["6", "7", "8", "9"])
+
+    def test_legacy_persisted_windows_are_discarded_and_compacted(self):
+        legacy_state = {
+            "schema_version": 1,
+            "health": {},
+            "incidents": [],
+            "active": {},
+            "notifications": {},
+            "pending_prompts": [],
+            "windows": {
+                "stale-process": [
+                    {"read_bytes": MIB, "write_bytes": 0, "total_bytes": MIB}
+                ]
+            },
+            "idle_armed": False,
+        }
+        self.state.write_text(json.dumps(legacy_state))
+
+        monitor = ResourceMonitor(
+            self.config,
+            state_path=self.state,
+            history_path=self.history,
+            now_fn=lambda: self.clock,
+        )
+        monitor._persist(force=True, now=self.clock)
+
+        self.assertNotIn("windows", monitor.state)
+        self.assertEqual(monitor._windows, {})
+        self.assertNotIn("windows", json.loads(self.state.read_text()))
 
     def test_historical_alerts_remain_separate_from_live_queue(self):
         _current, incident = self.open_incident()
@@ -305,6 +363,8 @@ class StatusTests(unittest.TestCase):
                     "sample_interval_seconds": 10,
                     "last_system_mib_s": 61.2,
                     "last_error": "",
+                    "sampled_processes": 12,
+                    "tracked_windows": 3,
                 },
                 "incidents": [{"id": "one", "process": "sample", "pid": 42, "status": "active", "peak_total_mib_s": 25, "last_seen_at": now}],
                 "active": {"identity": "one"},
@@ -329,6 +389,8 @@ class StatusTests(unittest.TestCase):
             )
             self.assertTrue(status["resource_monitor"]["healthy"])
             self.assertEqual(status["resource_monitor"]["active_incidents"], 1)
+            self.assertEqual(status["resource_monitor"]["sampled_processes"], 12)
+            self.assertEqual(status["resource_monitor"]["tracked_windows"], 3)
             self.assertEqual(status["resource_monitor"]["recent_incidents"][0]["id"], "one")
             self.assertIn("attribution_boundary", status["resource_monitor"])
             json.dumps(status)

@@ -78,7 +78,6 @@ def _default_state() -> dict[str, Any]:
         "active": {},
         "notifications": {},
         "pending_prompts": [],
-        "windows": {},
         "idle_armed": False,
     }
 
@@ -92,8 +91,12 @@ def _read_json(path: Path) -> dict[str, Any]:
         return _default_state()
     base = _default_state()
     base.update(value)
+    # Sampling windows cannot survive a restart because the matching previous
+    # process snapshot is intentionally runtime-only. Drop legacy persisted
+    # windows so old state is compacted on the next write.
+    base.pop("windows", None)
     for key, expected in (("incidents", list), ("active", dict), ("notifications", dict),
-                          ("pending_prompts", list), ("windows", dict), ("health", dict)):
+                          ("pending_prompts", list), ("health", dict)):
         if not isinstance(base.get(key), expected):
             base[key] = expected()
     return base
@@ -175,6 +178,7 @@ class ResourceMonitor:
         self.prompt_fn = prompt_fn or self._prompt_default
         self.identity_reader = identity_reader
         self.state = _read_json(self.state_path)
+        self._windows: dict[str, list[dict[str, Any]]] = {}
         health = self.state.get("health") if isinstance(self.state.get("health"), dict) else {}
         self._last_persist_at = float(
             health.get("last_persisted_at") or health.get("last_sample_at") or 0
@@ -304,11 +308,6 @@ class ResourceMonitor:
         self.state["notifications"] = {
             key: value for key, value in notifications[-100:] if now - value <= cooldown * 2
         }
-        self.state["windows"] = {
-            key: list(value)[-2:] for key, value in self.state["windows"].items()
-            if isinstance(value, list)
-        }
-
     def _qualified(self, interval: dict[str, Any]) -> bool:
         total_limit = float(self.config.get("process_high_io_total_mib_per_second", 20))
         write_limit = float(self.config.get("process_high_io_write_mib_per_second", 10))
@@ -501,27 +500,33 @@ class ResourceMonitor:
         system_gate = float(self.config.get("system_disk_busy_mib_per_second", 50))
         aggregate_hot = available and system_rate >= system_gate
         hot_instances: set[str] = set()
+        tracked_instances: set[str] = set()
         before_events = self._event_signature()
         previous_error = str((self.state.get("health") or {}).get("last_error") or "")
+
+        if not aggregate_hot:
+            self._windows.clear()
 
         for pid, proc in current.items():
             instance = process_instance_id(proc)
             old = previous.get(pid)
             interval = rolling_delta(old, proc, elapsed) if old else None
-            window = self.state["windows"].setdefault(instance, [])
             if interval is None:
-                window.clear()
+                self._windows.pop(instance, None)
                 continue
             interval["qualified"] = bool(aggregate_hot and self._qualified(interval))
-            if aggregate_hot:
+            active_id = self.state["active"].get(instance)
+            window: list[dict[str, Any]] | None = None
+            if aggregate_hot and not active_id:
+                window = self._windows.setdefault(instance, [])
                 window.append(interval)
                 del window[:-2]
+                tracked_instances.add(instance)
             else:
-                window.clear()
+                self._windows.pop(instance, None)
             if interval["qualified"]:
                 hot_instances.add(instance)
 
-            active_id = self.state["active"].get(instance)
             if active_id:
                 incident = self._incident_by_id(active_id)
                 if incident:
@@ -535,17 +540,26 @@ class ResourceMonitor:
                     if interval["qualified"]:
                         incident["cool_samples"] = 0
 
-            required = max(1, int(self.config.get("process_io_required_intervals", 2)))
-            minimum = float(self.config.get("process_io_minimum_window_mib", 256)) * MIB
-            qualifying = sum(bool(item.get("qualified")) for item in window)
-            total_bytes = sum(int(item.get("total_bytes", 0)) for item in window)
-            if (
-                instance not in self.state["active"]
-                and len(window) >= 2
-                and qualifying >= required
-                and total_bytes >= minimum
-            ):
-                self._open_incident(proc, instance, list(window), system_rate, observed_at)
+            if window is not None:
+                required = max(1, int(self.config.get("process_io_required_intervals", 2)))
+                minimum = float(self.config.get("process_io_minimum_window_mib", 256)) * MIB
+                qualifying = sum(bool(item.get("qualified")) for item in window)
+                total_bytes = sum(int(item.get("total_bytes", 0)) for item in window)
+                if (
+                    len(window) >= 2
+                    and qualifying >= required
+                    and total_bytes >= minimum
+                ):
+                    self._open_incident(proc, instance, list(window), system_rate, observed_at)
+                    self._windows.pop(instance, None)
+                    tracked_instances.discard(instance)
+
+        if aggregate_hot:
+            self._windows = {
+                instance: window
+                for instance, window in self._windows.items()
+                if instance in tracked_instances and window
+            }
 
         if available:
             recovery_samples = max(1, int(self.config.get("resource_monitor_recovery_cool_samples", 6)))
@@ -562,7 +576,7 @@ class ResourceMonitor:
                     incident["ended_at"] = observed_at
                     incident["last_seen_at"] = observed_at
                     self.state["active"].pop(instance, None)
-                    self.state["windows"].pop(instance, None)
+                    self._windows.pop(instance, None)
                     self._history("recovered", incident, cool_samples=recovery_samples)
 
         self._handle_idle_return(float(idle_seconds), observed_at)
@@ -582,6 +596,8 @@ class ResourceMonitor:
             "last_prompt_success_at": prompt_health.get("last_success_at"),
             "active_incidents": len(self.state["active"]),
             "pending_prompts": len(self.state["pending_prompts"]),
+            "sampled_processes": len(current),
+            "tracked_windows": len(self._windows),
             "suppressed_incidents": sum(
                 1
                 for incident in self.state["incidents"]

@@ -50,7 +50,7 @@ Suppression means “record the understood isolated case without interrupting th
 
 State is written atomically under `$HOME/Library/Application Support/idle-maintenance/` with heartbeat writes throttled to a bounded cadence while lifecycle changes persist immediately:
 
-- `resource-monitor-state.json`: bounded health, active incidents, recent incident summaries, notification cooldowns, pending prompts, and deterministic triage metadata;
+- `resource-monitor-state.json`: bounded health, active incidents, recent incident summaries, notification cooldowns, pending prompts, and deterministic triage metadata. Per-process sampling windows remain runtime-only and are discarded when a process leaves the current hot snapshot;
 - `resource-monitor-history.jsonl`: bounded append history for incident open, suppression, recovery, and prompt outcomes;
 - `resource-monitor.lock`: the single-instance lock.
 
