@@ -52,7 +52,7 @@ chmod +x "$TMP_CORE"
 CODESIGN_IDENTITY="$CODESIGN_IDENTITY" "$TMP_CORE" "$STAGE_ROOT"
 
 RES_DIR="$STAGED_APP/Contents/Resources/maintenance"
-cp "$SRC_DIR"/{maintenance_core.py,process_identity.py,process_sampling.py,process_triage.py,process_review.py,prompt_session.py,review_ui.py,storage_cleanup_core.py,disk_activity.py,maint.py,shortcut_review.py,maintenance_status_extended.py} "$RES_DIR/"
+cp "$SRC_DIR"/{activity_intelligence.py,maintenance_core.py,process_identity.py,process_sampling.py,process_triage.py,process_review.py,prompt_session.py,review_ui.py,storage_cleanup_core.py,disk_activity.py,maint.py,shortcut_review.py,maintenance_status_extended.py} "$RES_DIR/"
 
 codesign --force --deep --sign "$CODESIGN_IDENTITY" "$STAGED_APP" >/dev/null
 codesign --verify --deep --strict "$STAGED_APP"
