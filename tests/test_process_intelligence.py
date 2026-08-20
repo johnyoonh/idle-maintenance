@@ -247,7 +247,7 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
             self.assertEqual(1, len(notifications))
             self.assertIn("needs review", notifications[0][0])
 
-    def test_cool_monitor_iteration_skips_process_snapshot_and_idle_poll(self):
+    def test_cool_monitor_iteration_skips_process_snapshot_but_polls_idle(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Mock(return_value={})
             idle = Mock(return_value=999)
@@ -276,8 +276,12 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
                     idle_provider=idle,
                 )
             snapshot.assert_not_called()
-            idle.assert_not_called()
+            idle.assert_called_once_with()
             fake_monitor.observe.assert_called_once()
+            self.assertEqual(
+                999,
+                fake_monitor.observe.call_args.kwargs["idle_seconds"],
+            )
 
     def test_state_heartbeat_writes_are_throttled(self):
         with tempfile.TemporaryDirectory() as directory:
