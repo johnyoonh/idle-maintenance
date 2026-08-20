@@ -105,9 +105,7 @@ class ReturnFlowTests(unittest.TestCase):
 
     def test_unknown_idle_sample_preserves_armed_return(self):
         self.observe(idle=601, now=8_100)
-
         self.observe(idle=None, now=8_110)
-
         self.assertTrue(self.monitor.state["return_armed"])
         self.assertEqual(self.events, [])
         self.assertFalse(self.monitor.state["health"]["idle_sample_available"])
@@ -118,33 +116,33 @@ class ReturnFlowTests(unittest.TestCase):
 
     def test_disabled_return_routing_never_arms_or_launches(self):
         self.monitor.config["return_routing_enabled"] = False
-
         self.observe(idle=601, now=8_200)
         self.observe(idle=0, now=8_210)
-
         self.assertFalse(self.monitor.state["return_armed"])
         self.assertEqual(self.events, [])
         self.assertFalse(self.monitor.state["health"]["return_routing_enabled"])
 
     def test_active_cutoff_is_configurable(self):
         self.monitor.config["return_active_cutoff_seconds"] = 45
-
         self.observe(idle=601, now=8_300)
         self.observe(idle=40, now=8_310)
-
         self.assertEqual(self.events, ["return"])
 
     def test_idle_reader_returns_unknown_on_command_or_parse_failure(self):
-        failed = lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, stdout="", stderr="failed")
-        invalid = lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="no idle field", stderr="")
+        def failed(*_args, **_kwargs):
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="failed")
+
+        def invalid(*_args, **_kwargs):
+            return subprocess.CompletedProcess([], 0, stdout="no idle field", stderr="")
 
         self.assertIsNone(resource_monitor.read_idle_seconds(failed))
         self.assertIsNone(resource_monitor.read_idle_seconds(invalid))
 
     def test_idle_reader_converts_hid_nanoseconds(self):
-        runner = lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 0, stdout='"HIDIdleTime" = 1250000000', stderr=""
-        )
+        def runner(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                [], 0, stdout='"HIDIdleTime" = 1250000000', stderr=""
+            )
 
         self.assertEqual(resource_monitor.read_idle_seconds(runner), 1.25)
 
@@ -271,13 +269,11 @@ class ReturnFlowTests(unittest.TestCase):
                 }
             )
         )
-
         status = maintenance_status.resource_monitor_status(
             support,
             {"healthy": True, "state": "running"},
             now,
         )
-
         self.assertEqual(status["state"], "degraded")
         self.assertFalse(status["idle_sample_available"])
         self.assertEqual(status["last_idle_sample_error"], "HID idle time unavailable")
