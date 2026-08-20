@@ -44,10 +44,10 @@ printf new > "$app/new-marker"
         )
         (source / "build_app_core.sh").chmod(0o755)
         for name in (
-            "maintenance_core.py", "process_identity.py", "process_sampling.py",
-            "process_triage.py", "process_review.py", "prompt_session.py", "review_ui.py",
-            "storage_cleanup_core.py", "disk_activity.py", "maint.py", "shortcut_review.py",
-            "maintenance_status_extended.py",
+            "activity_intelligence.py", "maintenance_core.py", "process_identity.py",
+            "process_sampling.py", "process_triage.py", "process_review.py", "prompt_session.py",
+            "review_ui.py", "storage_cleanup_core.py", "disk_activity.py", "maint.py",
+            "shortcut_review.py", "maintenance_status_extended.py",
         ):
             (source / name).write_text("# fixture\n", encoding="utf-8")
         (fake_bin / "codesign").write_text(

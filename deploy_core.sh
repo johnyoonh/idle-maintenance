@@ -8,6 +8,7 @@ echo "Deploying Idle Maintenance to $DEST..."
 
 # Copy runtime scripts together so imports cannot resolve to mixed generations.
 cp app_auditor.py "$DEST/"
+cp activity_intelligence.py "$DEST/"
 cp idle_config.py "$DEST/"
 cp idle_watcher.py "$DEST/"
 cp maint.py "$DEST/"

@@ -2,6 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = (
+    "activity_intelligence.py",
     "maint.py",
     "shortcut_review.py",
     "maintenance_status_extended.py",
