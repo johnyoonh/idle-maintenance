@@ -41,6 +41,7 @@ Default policy:
 - arm the resume flow after more than 10 minutes idle;
 - consider the user returned when idle falls below 30 seconds;
 - require one hour between resume-flow triggers;
+- treat failed HID-idle reads as unknown instead of a synthetic return;
 - keep the stricter 15-minute threshold for queued resource-incident prompts;
 - deliver any armed resource prompt before the general interactive maintenance review;
 - run interactive app/process maintenance;
@@ -48,6 +49,8 @@ Default policy:
 - fall back to the configured handoff URL or app if the coordinator cannot launch.
 
 The return detector persists its armed/cooldown state and records the most recent return-flow success or failure in resource-monitor health. This prevents a monitor restart from turning a single return into repeated resume launches.
+
+Set `return_routing_enabled` to `false` to disable the contextual handoff while keeping HID sampling available for queued process reviews. `return_active_cutoff_seconds` controls how recently active the Mac must be before an armed return fires (30 seconds by default). `maint status` reports both the routing state and HID sampling failures.
 
 The Hammerspoon coordinator asks wiki-automation for the highest-ranked TaskForge task. A TaskNote may save an exact digital work target using `resume_required`, `resume_kind`, `resume_target`, `resume_app`, `resume_profile`, `resume_label`, and `resume_confidence`. Exact mappings open immediately; inferred or missing mappings are confirmed in Hammerspoon and the selection is recorded back to the TaskNote.
 

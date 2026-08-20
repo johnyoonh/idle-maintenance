@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     "show_shortcuts_on_finish": True,
     "shortcut_review_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",
     "idle_threshold_minutes": 10,
+    "return_routing_enabled": True,
+    "return_active_cutoff_seconds": 30,
     "check_interval_seconds": 30,
     "post_trigger_cooldown_seconds": 3600,
     "stale_days_limit": 90,

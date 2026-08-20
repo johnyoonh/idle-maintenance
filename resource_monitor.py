@@ -134,8 +134,8 @@ def append_bounded_jsonl(path: Path, record: dict[str, Any], limit: int) -> None
     _atomic_write_text(path, "\n".join(rows) + "\n")
 
 
-def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float:
-    """Read HID idle time without privileges; return zero when unavailable."""
+def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float | None:
+    """Read HID idle time without privileges; return unknown when unavailable."""
     import subprocess
 
     runner = command_runner or subprocess.run
@@ -148,9 +148,11 @@ def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return 0.0
+        return None
+    if result.returncode != 0:
+        return None
     match = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', result.stdout or "")
-    return int(match.group(1)) / 1_000_000_000 if match else 0.0
+    return int(match.group(1)) / 1_000_000_000 if match else None
 
 
 def _known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
@@ -504,10 +506,18 @@ class ResourceMonitor:
         else:
             self.state["idle_armed"] = False
 
+        if not bool(self.config.get("return_routing_enabled", True)):
+            self.state["return_armed"] = False
+            return
+
         if idle_seconds > return_threshold:
             self.state["return_armed"] = True
             return
-        if not self.state.get("return_armed") or idle_seconds >= 30:
+        active_cutoff = max(
+            0.0,
+            float(self.config.get("return_active_cutoff_seconds", 30)),
+        )
+        if not self.state.get("return_armed") or idle_seconds >= active_cutoff:
             return
 
         self.state["return_armed"] = False
@@ -542,7 +552,7 @@ class ResourceMonitor:
         system_status: dict[str, Any],
         *,
         seconds: float | None = None,
-        idle_seconds: float = 0,
+        idle_seconds: float | None = None,
         now: float | None = None,
     ) -> None:
         """Consume one interval and persist lifecycle changes immediately, heartbeats at a bounded cadence."""
@@ -555,7 +565,8 @@ class ResourceMonitor:
         hot_instances: set[str] = set()
         tracked_instances: set[str] = set()
         before_events = self._event_signature()
-        previous_error = str((self.state.get("health") or {}).get("last_error") or "")
+        previous_health = self.state.get("health") if isinstance(self.state.get("health"), dict) else {}
+        previous_error = str(previous_health.get("last_error") or "")
 
         if not aggregate_hot:
             self._windows.clear()
@@ -632,7 +643,9 @@ class ResourceMonitor:
                     self._windows.pop(instance, None)
                     self._history("recovered", incident, cool_samples=recovery_samples)
 
-        self._handle_idle_return(float(idle_seconds), observed_at)
+        idle_sample_available = idle_seconds is not None
+        if idle_sample_available:
+            self._handle_idle_return(float(idle_seconds), observed_at)
         prompt_health = self.state.get("prompt_health") if isinstance(self.state.get("prompt_health"), dict) else {}
         return_health = self.state.get("return_health") if isinstance(self.state.get("return_health"), dict) else {}
         new_error = "" if available else str(system_status.get("error") or "iostat unavailable")
@@ -642,6 +655,15 @@ class ResourceMonitor:
             "sample_interval_seconds": self.interval_seconds,
             "state_flush_seconds": self.state_flush_seconds,
             "idle_poll_seconds": self.idle_poll_seconds,
+            "idle_sample_available": idle_sample_available,
+            "idle_sample_seconds": float(idle_seconds) if idle_sample_available else None,
+            "last_idle_sample_at": observed_at if idle_sample_available else previous_health.get("last_idle_sample_at"),
+            "last_idle_sample_error": "" if idle_sample_available else "HID idle time unavailable",
+            "return_routing_enabled": bool(self.config.get("return_routing_enabled", True)),
+            "return_active_cutoff_seconds": max(
+                0.0,
+                float(self.config.get("return_active_cutoff_seconds", 30)),
+            ),
             "snapshot_mode": "aggregate-gated",
             "last_system_mib_s": system_rate if available else None,
             "last_error": new_error,
@@ -688,7 +710,7 @@ def run_monitor(
     once: bool = False,
     snapshot_provider: Callable[[], dict[int, dict[str, Any]]] | None = None,
     disk_provider: Callable[[float], dict[str, Any]] | None = None,
-    idle_provider: Callable[[], float] = read_idle_seconds,
+    idle_provider: Callable[[], float | None] = read_idle_seconds,
     monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> int:
     cfg = config or load_config(os.path.dirname(__file__))
@@ -713,7 +735,7 @@ def run_monitor(
         )
         previous: dict[int, dict[str, Any]] = {}
         next_idle_poll_at = 0.0
-        cached_idle_seconds = 0.0
+        cached_idle_seconds: float | None = None
         while not stop:
             status = disk(monitor.interval_seconds)
             available = bool(status.get("available"))
