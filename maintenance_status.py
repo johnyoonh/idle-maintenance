@@ -172,9 +172,10 @@ def resource_monitor_status(
     last_prompt_error = str(health.get("last_prompt_error") or "")
     last_return_error = str(return_health.get("last_error") or health.get("last_return_error") or "")
     last_return_fallback = bool(return_health.get("fallback"))
+    last_idle_sample_error = str(health.get("last_idle_sample_error") or "")
     if not state:
         state_status = "not-started"
-    elif last_error or last_prompt_error or last_return_error or last_return_fallback:
+    elif last_error or last_prompt_error or last_return_error or last_return_fallback or last_idle_sample_error:
         state_status = "degraded"
     elif not last_sample or now - last_sample > stale_after:
         state_status = "stale"
@@ -199,6 +200,12 @@ def resource_monitor_status(
         "last_system_mib_s": health.get("last_system_mib_s"),
         "last_error": last_error,
         "last_prompt_error": last_prompt_error,
+        "idle_sample_available": bool(health.get("idle_sample_available")),
+        "idle_sample_seconds": health.get("idle_sample_seconds"),
+        "last_idle_sample_at": health.get("last_idle_sample_at"),
+        "last_idle_sample_error": last_idle_sample_error,
+        "return_routing_enabled": bool(health.get("return_routing_enabled", True)),
+        "return_active_cutoff_seconds": health.get("return_active_cutoff_seconds", 30),
         "last_return_flow_at": state.get("last_return_flow_at") or health.get("last_return_flow_at"),
         "last_return_success_at": return_health.get("last_success_at") or health.get("last_return_success_at"),
         "last_return_error": last_return_error,
@@ -219,8 +226,11 @@ def render_text(status: dict[str, Any]) -> str:
     monitor = status["resource_monitor"]
     queues = status["queues"]
     terminal = status["terminal_suggestions"]
+    intelligence = status.get("pattern_intelligence", {})
     monitor_launch = monitor["launchd"]
-    if monitor["last_return_error"]:
+    if not monitor["return_routing_enabled"]:
+        return_summary = "disabled by configuration"
+    elif monitor["last_return_error"]:
         return_summary = f"error: {monitor['last_return_error']}"
     elif monitor["last_return_fallback"]:
         return_summary = "fallback used on last return"
@@ -241,6 +251,11 @@ def render_text(status: dict[str, Any]) -> str:
         f"- Active incidents: {monitor['active_incidents']}; queued review prompts: {monitor['pending_prompts']}",
         f"- Current sampling: {monitor['sampled_processes']} processes; {monitor['tracked_windows']} candidate windows",
         f"- Latest system sample: {monitor['last_system_mib_s'] if monitor['last_system_mib_s'] is not None else 'unavailable'} MiB/s",
+        (
+            f"- HID idle sample: {monitor['idle_sample_seconds']:.1f}s"
+            if monitor["idle_sample_available"] and monitor["idle_sample_seconds"] is not None
+            else f"- HID idle sample: unavailable ({monitor['last_idle_sample_error'] or 'not sampled yet'})"
+        ),
         f"- Resume routing: {return_summary}",
         f"- Attribution: {monitor['attribution_boundary']}",
         "",
@@ -253,6 +268,23 @@ def render_text(status: dict[str, Any]) -> str:
         lines.append(
             f"- Incident {incident.get('process', 'process')} PID {incident.get('pid', '?')}: "
             f"{incident.get('status', 'unknown')}, peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s"
+        )
+    latest_diagnosis = intelligence.get("latest") if isinstance(intelligence, dict) else None
+    health = intelligence.get("health") if isinstance(intelligence, dict) else {}
+    lines.extend(
+        [
+            "",
+            "Pattern intelligence:",
+            f"- Vector backend: {health.get('vector_backend') or 'not-started'}; stored events: {intelligence.get('events', 0)}; pending spikes: {intelligence.get('pending_spikes', 0)}",
+            f"- Worker error: {health.get('last_error') or health.get('embedding_error') or 'none'}",
+        ]
+    )
+    if isinstance(latest_diagnosis, dict):
+        structured = latest_diagnosis.get("diagnosis") if isinstance(latest_diagnosis.get("diagnosis"), dict) else {}
+        confidence = structured.get("confidence")
+        lines.append(
+            f"- Latest remedy{f' ({float(confidence):.0%} confidence)' if confidence is not None else ''}: "
+            f"{' '.join(str(latest_diagnosis.get('response') or '').split())[:300]}"
         )
     runner_output = runner.get("status_output", "").strip()
     if runner_output:
@@ -292,6 +324,18 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             raise ValueError
     except (TypeError, ValueError):
         start, end = 9, 21
+    try:
+        from activity_intelligence import status as intelligence_status
+
+        pattern_intelligence = intelligence_status(support_dir / "activity-intelligence.sqlite3")
+    except Exception as error:
+        pattern_intelligence = {
+            "events": 0,
+            "stored_diagnoses": 0,
+            "pending_spikes": 0,
+            "latest": None,
+            "health": {"last_error": str(error)[:500], "vector_backend": "unavailable"},
+        }
     status = {
         "runner": {
             **launch_status,
@@ -300,6 +344,7 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             "status_error": status_error,
         },
         "resource_monitor": resource_monitor_status(support_dir, monitor_launch, now),
+        "pattern_intelligence": pattern_intelligence,
         "latest_event": latest_log_event(log_path),
         "queues": queue_status(config, support_dir, now),
         "terminal_suggestions": {

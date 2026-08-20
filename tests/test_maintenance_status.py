@@ -85,6 +85,8 @@ class MaintenanceStatusTests(unittest.TestCase):
         self.assertEqual(status["queues"]["apps"]["snoozed"], 1)
         self.assertEqual(status["queues"]["apps"]["backed_off"], 1)
         self.assertEqual(status["queues"]["terminal_disabled"], 1)
+        self.assertEqual(status["pattern_intelligence"]["health"]["vector_backend"], "not-started")
+        self.assertIn("Pattern intelligence:", status["text"])
 
     def test_latest_log_event_uses_last_nonempty_line(self):
         log = self.logs / "idle-maintenance-runtime.log"

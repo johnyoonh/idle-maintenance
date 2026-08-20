@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,6 +103,51 @@ class ReturnFlowTests(unittest.TestCase):
         self.assertEqual(health["last_error"], "synthetic return failure")
         self.assertEqual(health["last_error_at"], 8010)
 
+    def test_unknown_idle_sample_preserves_armed_return(self):
+        self.observe(idle=601, now=8_100)
+
+        self.observe(idle=None, now=8_110)
+
+        self.assertTrue(self.monitor.state["return_armed"])
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.monitor.state["health"]["idle_sample_available"])
+        self.assertEqual(
+            self.monitor.state["health"]["last_idle_sample_error"],
+            "HID idle time unavailable",
+        )
+
+    def test_disabled_return_routing_never_arms_or_launches(self):
+        self.monitor.config["return_routing_enabled"] = False
+
+        self.observe(idle=601, now=8_200)
+        self.observe(idle=0, now=8_210)
+
+        self.assertFalse(self.monitor.state["return_armed"])
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.monitor.state["health"]["return_routing_enabled"])
+
+    def test_active_cutoff_is_configurable(self):
+        self.monitor.config["return_active_cutoff_seconds"] = 45
+
+        self.observe(idle=601, now=8_300)
+        self.observe(idle=40, now=8_310)
+
+        self.assertEqual(self.events, ["return"])
+
+    def test_idle_reader_returns_unknown_on_command_or_parse_failure(self):
+        failed = lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, stdout="", stderr="failed")
+        invalid = lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="no idle field", stderr="")
+
+        self.assertIsNone(resource_monitor.read_idle_seconds(failed))
+        self.assertIsNone(resource_monitor.read_idle_seconds(invalid))
+
+    def test_idle_reader_converts_hid_nanoseconds(self):
+        runner = lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout='"HIDIdleTime" = 1250000000', stderr=""
+        )
+
+        self.assertEqual(resource_monitor.read_idle_seconds(runner), 1.25)
+
     def test_run_monitor_polls_idle_without_pending_prompts(self):
         observed = []
         idle_polls = []
@@ -135,6 +181,37 @@ class ReturnFlowTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(idle_polls, [True])
         self.assertEqual(observed, [777])
+
+    def test_run_monitor_passes_unknown_idle_sample_through(self):
+        observed = []
+
+        class FakeMonitor:
+            interval_seconds = 10
+            idle_poll_seconds = 30
+
+            def observe(self, _previous, _current, _status, **kwargs):
+                observed.append(kwargs["idle_seconds"])
+
+        config = {
+            "resource_monitor_lock_path": str(self.root / "unknown-monitor.lock"),
+            "system_disk_busy_mib_per_second": 50,
+        }
+        with patch.object(resource_monitor, "ResourceMonitor", return_value=FakeMonitor()):
+            result = resource_monitor.run_monitor(
+                config,
+                once=True,
+                snapshot_provider=lambda: {},
+                disk_provider=lambda _seconds: {
+                    "available": True,
+                    "mib_per_second": 0,
+                    "error": "",
+                },
+                idle_provider=lambda: None,
+                monotonic_fn=lambda: 1,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(observed, [None])
 
     def test_status_degrades_when_resume_router_uses_fallback(self):
         support = self.root / "support"
@@ -171,6 +248,40 @@ class ReturnFlowTests(unittest.TestCase):
         self.assertFalse(status["healthy"])
         self.assertTrue(status["last_return_fallback"])
         self.assertEqual(status["last_return_success_at"], now - 4)
+
+    def test_status_reports_idle_sampling_and_disabled_routing(self):
+        support = self.root / "status-support"
+        support.mkdir()
+        now = 10_000.0
+        (support / maintenance_status.MONITOR_STATE).write_text(
+            json.dumps(
+                {
+                    "health": {
+                        "last_sample_at": now - 5,
+                        "sample_interval_seconds": 10,
+                        "idle_sample_available": False,
+                        "last_idle_sample_at": now - 35,
+                        "last_idle_sample_error": "HID idle time unavailable",
+                        "return_routing_enabled": False,
+                        "return_active_cutoff_seconds": 30,
+                    },
+                    "incidents": [],
+                    "active": {},
+                    "pending_prompts": [],
+                }
+            )
+        )
+
+        status = maintenance_status.resource_monitor_status(
+            support,
+            {"healthy": True, "state": "running"},
+            now,
+        )
+
+        self.assertEqual(status["state"], "degraded")
+        self.assertFalse(status["idle_sample_available"])
+        self.assertEqual(status["last_idle_sample_error"], "HID idle time unavailable")
+        self.assertFalse(status["return_routing_enabled"])
 
 
 if __name__ == "__main__":

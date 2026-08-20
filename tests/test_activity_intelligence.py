@@ -1,18 +1,23 @@
 import json
+import io
+import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
 from activity_intelligence import (
-    CodexDiagnoser,
+    ActivityWatchContext,
     DiagnosisResult,
+    OpenAIAPI,
     VectorEventStore,
     app_usage_context,
     cosine_similarity,
     embed_text,
     incident_event,
     install_codex_event_hook,
+    main,
     record_external_event,
     run_cycle,
     status,
@@ -85,6 +90,14 @@ class ActivityIntelligenceTests(unittest.TestCase):
         same = embed_text("resource spike fileproviderd group cloud-sync recurrent foreground Finder")
         other = embed_text("resource spike photoanalysisd group photos-analysis foreground Photos")
         self.assertGreater(cosine_similarity(first, same), cosine_similarity(first, other))
+
+    def test_cli_help_lists_canonical_commands(self):
+        output = io.StringIO()
+        with self.assertRaisesRegex(SystemExit, "0"), redirect_stdout(output):
+            main(["--help"])
+        self.assertIn("process", output.getvalue())
+        self.assertIn("status", output.getvalue())
+        self.assertIn("record", output.getvalue())
 
     def test_app_usage_context_removes_paths(self):
         self.usage.write_text(json.dumps({
@@ -179,6 +192,55 @@ class ActivityIntelligenceTests(unittest.TestCase):
         self.assertEqual(second["diagnoses"], 0)
         self.assertEqual(second_diagnoser.prompts, [])
 
+    def test_two_spikes_trigger_when_latest_is_materially_worse(self):
+        diagnoser = FakeDiagnoser()
+        first = self.incident(1, peak=40)
+        second = self.incident(2, peak=70)
+        second["started_at"] = self.clock
+        self.write_state([first, second])
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=diagnoser,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+        self.assertEqual(result["diagnoses"], 1)
+
+    def test_low_confidence_structured_diagnosis_is_saved_without_notification(self):
+        class LowConfidenceDiagnoser(FakeDiagnoser):
+            def diagnose(self, prompt):
+                self.prompts.append(prompt)
+                diagnosis = {
+                    "summary": "Pattern is uncertain.",
+                    "likely_causes": [],
+                    "remedies": ["Observe one more recurrence"],
+                    "evidence": ["Three similar spikes"],
+                    "verification": "Compare the next sample.",
+                    "confidence": 0.4,
+                    "urgency": "low",
+                    "uncertainty": "Insufficient context.",
+                }
+                return DiagnosisResult(True, "Pattern is uncertain.", diagnosis=diagnosis)
+
+        notifications = []
+        self.write_state([self.incident(1), self.incident(2), self.incident(3)])
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=LowConfidenceDiagnoser(),
+            notify_fn=lambda *args: notifications.append(args),
+            now_fn=lambda: self.clock,
+        )
+        self.assertEqual(result["diagnoses"], 1)
+        self.assertEqual(notifications, [])
+
     def test_external_events_share_same_local_store(self):
         event_id = record_external_event(
             source="codex",
@@ -191,7 +253,7 @@ class ActivityIntelligenceTests(unittest.TestCase):
         counts = status(self.db)
         self.assertEqual(counts["events"], 1)
 
-    def test_codex_hook_records_idle_maintenance_investigation(self):
+    def test_codex_hook_records_metadata_without_prompt_text(self):
         calls = []
         core = SimpleNamespace(
             open_codex_in_terminal=lambda prompt, cwd="/": calls.append((prompt, cwd)) or (True, "Terminal", True)
@@ -203,25 +265,103 @@ class ActivityIntelligenceTests(unittest.TestCase):
             rows = store.connection.execute("SELECT source, kind, summary FROM events").fetchall()
         self.assertEqual(rows[0]["source"], "codex")
         self.assertEqual(rows[0]["kind"], "investigation")
-        self.assertIn("fileproviderd", rows[0]["summary"])
+        self.assertEqual(rows[0]["summary"], "codex investigation | project tmp")
+        self.assertNotIn("fileproviderd", rows[0]["summary"])
 
-    def test_codex_diagnoser_uses_ephemeral_read_only_command_and_prompt_argument(self):
-        seen = {}
+    def test_openai_diagnoser_uses_tool_free_structured_nonstored_response(self):
+        seen = []
 
-        def runner(command, **kwargs):
-            seen["command"] = command
-            seen["kwargs"] = kwargs
-            return SimpleNamespace(returncode=0, stdout="A bounded remedy", stderr="")
+        class Response:
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return None
+            def read(self):
+                return self.payload
 
-        engine = CodexDiagnoser(self.config, command_runner=runner)
+        diagnosis = {
+            "summary": "Repeated cloud sync churn.",
+            "likely_causes": ["A recurring sync backlog"],
+            "remedies": ["Pause the triggering bulk change"],
+            "evidence": ["Three similar incidents"],
+            "verification": "Confirm disk throughput returns to baseline.",
+            "confidence": 0.85,
+            "urgency": "medium",
+            "uncertainty": "Per-process counters do not prove physical disk attribution.",
+        }
+
+        def opener(request, timeout):
+            seen.append((request, timeout))
+            return Response({"output": [{"content": [{"type": "output_text", "text": json.dumps(diagnosis)}]}]})
+
+        engine = OpenAIAPI(self.config, api_key="synthetic-key", opener=opener)
         result = engine.diagnose("diagnose repeated pattern")
         self.assertTrue(result.ok)
-        self.assertEqual(seen["command"][-1], "diagnose repeated pattern")
-        self.assertIn("--ephemeral", seen["command"])
-        self.assertIn("--ignore-user-config", seen["command"])
-        self.assertIn("read-only", seen["command"])
-        self.assertNotIn("input", seen["kwargs"])
-        self.assertEqual(seen["kwargs"]["cwd"], "/")
+        payload = json.loads(seen[0][0].data)
+        self.assertFalse(payload["store"])
+        self.assertEqual(payload["text"]["format"]["type"], "json_schema")
+        self.assertNotIn("tools", payload)
+        self.assertEqual(result.diagnosis["confidence"], 0.85)
+
+    def test_openai_embedding_uses_sanitized_text_and_configured_dimensions(self):
+        seen = []
+
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return None
+            def read(self):
+                return json.dumps({"data": [{"embedding": [0.0] * 512}]}).encode()
+
+        def opener(request, timeout):
+            seen.append(json.loads(request.data))
+            return Response()
+
+        vector = OpenAIAPI(self.config, api_key="synthetic-key", opener=opener).embed(
+            "resource spike | foreground Codex | codex-projects idle-maintenance"
+        )
+        self.assertEqual(len(vector), 512)
+        self.assertEqual(seen[0]["model"], "text-embedding-3-small")
+        self.assertEqual(seen[0]["dimensions"], 512)
+        self.assertNotIn("prompt", seen[0]["input"].lower())
+
+    def test_activitywatch_context_discards_titles_and_keeps_coarse_fields(self):
+        responses = {
+            "/api/0/buckets": {
+                "window": {"type": "currentwindow"},
+                "metrics": {"type": "os.performance.sample"},
+            },
+            "/api/0/buckets/window/events": [
+                {"timestamp": "2027-01-15T08:00:00Z", "data": {"app": "Codex", "title": "private client prompt"}}
+            ],
+            "/api/0/buckets/metrics/events": [
+                {"timestamp": "2027-01-15T08:00:00Z", "data": {"cpu_idle_percent": 12, "load_1m": 8, "secret": "drop"}}
+            ],
+        }
+
+        class Response:
+            def __init__(self, value):
+                self.value = value
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return None
+            def read(self):
+                return json.dumps(self.value).encode()
+
+        def opener(request, timeout):
+            path = request.full_url.split("http://aw.local", 1)[1].split("?", 1)[0]
+            return Response(responses[path])
+
+        context = ActivityWatchContext("http://aw.local", opener=opener).context_at(1_800_000_000, 1200)
+        encoded = json.dumps(context)
+        self.assertEqual(context["foreground_apps"], ["Codex"])
+        self.assertEqual(context["performance"], {"cpu_idle_percent": 12.0, "load_1m": 8.0})
+        self.assertNotIn("private client prompt", encoded)
+        self.assertNotIn("secret", encoded)
 
     def test_store_deduplicates_event_ids(self):
         event = {
@@ -236,6 +376,39 @@ class ActivityIntelligenceTests(unittest.TestCase):
             self.assertTrue(store.add_event(event))
             self.assertFalse(store.add_event(event))
             self.assertEqual(store.counts()["events"], 1)
+
+    def test_store_uses_sqlite_vec_when_dependency_is_installed(self):
+        try:
+            import sqlite_vec  # noqa: F401
+        except ImportError:
+            self.skipTest("sqlite-vec is not installed in this interpreter")
+        with VectorEventStore(self.db) as store:
+            self.assertEqual(store.vector_backend, "sqlite-vec")
+
+    def test_store_migrates_legacy_vector_dimensions(self):
+        connection = sqlite3.connect(self.db)
+        connection.executescript("""
+            CREATE TABLE events(
+              event_id TEXT PRIMARY KEY, timestamp REAL NOT NULL, source TEXT NOT NULL,
+              kind TEXT NOT NULL, summary TEXT NOT NULL, vector_json TEXT NOT NULL,
+              payload_json TEXT NOT NULL, reviewed_at REAL);
+            CREATE TABLE diagnoses(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,
+              trigger_event_id TEXT NOT NULL, centroid_json TEXT NOT NULL,
+              event_ids_json TEXT NOT NULL, response TEXT NOT NULL, model TEXT NOT NULL);
+        """)
+        connection.execute(
+            "INSERT INTO events VALUES(?,?,?,?,?,?,?,NULL)",
+            ("legacy", self.clock, "idle-maintenance", "resource-spike", "resource spike cloud sync", json.dumps([0.0] * 96), "{}"),
+        )
+        connection.commit()
+        connection.close()
+        with VectorEventStore(self.db) as store:
+            row = store.connection.execute("SELECT vector_json FROM events WHERE event_id='legacy'").fetchone()
+            if store.vector_backend == "sqlite-vec":
+                self.assertEqual(len(json.loads(row[0])), 512)
+            columns = {value[1] for value in store.connection.execute("PRAGMA table_info(diagnoses)")}
+            self.assertIn("diagnosis_json", columns)
 
 
 if __name__ == "__main__":

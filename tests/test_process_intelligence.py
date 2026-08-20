@@ -283,6 +283,32 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
                 fake_monitor.observe.call_args.kwargs["idle_seconds"],
             )
 
+    def test_monitor_lifecycle_change_launches_pattern_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_monitor = Mock()
+            fake_monitor.interval_seconds = 10
+            fake_monitor.idle_poll_seconds = 30
+            fake_monitor.observe.return_value = True
+            config = {
+                "resource_monitor_lock_path": str(Path(directory) / "monitor.lock"),
+                "activity_intelligence_enabled": True,
+            }
+            with (
+                patch("resource_monitor.ResourceMonitor", return_value=fake_monitor),
+                patch("activity_intelligence.launch_cycle", return_value=True) as launch,
+            ):
+                run_monitor(
+                    config,
+                    once=True,
+                    disk_provider=lambda _seconds: {
+                        "available": True,
+                        "mib_per_second": 1,
+                        "error": "",
+                    },
+                    idle_provider=lambda: 0,
+                )
+            launch.assert_called_once()
+
     def test_state_heartbeat_writes_are_throttled(self):
         with tempfile.TemporaryDirectory() as directory:
             writes = []
