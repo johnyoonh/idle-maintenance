@@ -1,8 +1,10 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import maintenance_status
 import resource_monitor
 from resource_monitor import ResourceMonitor
 
@@ -133,6 +135,42 @@ class ReturnFlowTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(idle_polls, [True])
         self.assertEqual(observed, [777])
+
+    def test_status_degrades_when_resume_router_uses_fallback(self):
+        support = self.root / "support"
+        support.mkdir()
+        now = 9_000.0
+        (support / maintenance_status.MONITOR_STATE).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "health": {
+                        "last_sample_at": now - 5,
+                        "sample_interval_seconds": 10,
+                        "last_error": "",
+                        "last_prompt_error": "",
+                    },
+                    "return_health": {
+                        "last_success_at": now - 4,
+                        "fallback": True,
+                    },
+                    "incidents": [],
+                    "active": {},
+                    "pending_prompts": [],
+                }
+            )
+        )
+
+        status = maintenance_status.resource_monitor_status(
+            support,
+            {"healthy": True, "state": "running"},
+            now,
+        )
+
+        self.assertEqual(status["state"], "degraded")
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["last_return_fallback"])
+        self.assertEqual(status["last_return_success_at"], now - 4)
 
 
 if __name__ == "__main__":
