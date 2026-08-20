@@ -32,34 +32,29 @@ $HOME/.local/bin/kb popup --surface gui --group auto --force
 
 The menu item **Refresh & Review Shortcuts** and the global Hammerspoon binding both call `maint shortcuts` instead of duplicating this sequence.
 
-## Optional away-return review
+## Automatic away-return review
 
-**Start / Restart Away-Return Review** starts the legacy opt-in watcher. It is separate from the signed resource monitor and is not required for normal monitoring.
+The resident resource monitor is the authoritative return detector. It polls HID idle time even when no process incident is queued, so automatic resume routing does not depend on the legacy `idle_watcher.py` process being enabled.
 
 Default policy:
 
-- arm after more than 10 minutes idle;
-- trigger when idle falls below 30 seconds after return;
-- require one hour between triggers;
+- arm the resume flow after more than 10 minutes idle;
+- consider the user returned when idle falls below 30 seconds;
+- require one hour between resume-flow triggers;
+- keep the stricter 15-minute threshold for queued resource-incident prompts;
+- deliver any armed resource prompt before the general interactive maintenance review;
 - run interactive app/process maintenance;
 - invoke `open hammerspoon://resumerouter` as the final UI;
 - fall back to the configured handoff URL or app if the coordinator cannot launch.
 
-The Hammerspoon coordinator asks wiki-automation for the highest-ranked
-TaskForge task. A TaskNote may save an exact digital work target using
-`resume_required`, `resume_kind`, `resume_target`, `resume_app`,
-`resume_profile`, `resume_label`, and `resume_confidence`. Exact mappings open
-immediately; inferred or missing mappings are confirmed in Hammerspoon and the
-selection is recorded back to the TaskNote.
+The return detector persists its armed/cooldown state and records the most recent return-flow success or failure in resource-monitor health. This prevents a monitor restart from turning a single return into repeated resume launches.
 
-Examples include a tuition URL, a direct subscription-email or draft link, a
-Canvas course page, or a saved interview-preparation conversation. Public docs
-and tests use synthetic domains and profile names; real targets remain in the
-private vault.
+The Hammerspoon coordinator asks wiki-automation for the highest-ranked TaskForge task. A TaskNote may save an exact digital work target using `resume_required`, `resume_kind`, `resume_target`, `resume_app`, `resume_profile`, `resume_label`, and `resume_confidence`. Exact mappings open immediately; inferred or missing mappings are confirmed in Hammerspoon and the selection is recorded back to the TaskNote.
 
-Starting the watcher intentionally runs one review immediately. `maint status` reports whether this optional watcher is running and displays its current thresholds.
+Examples include a tuition URL, a direct subscription-email or draft link, a Canvas course page, or a saved interview-preparation conversation. Public docs and tests use synthetic domains and profile names; real targets remain in the private vault.
 
-`maint shortcuts` remains the manual refresh-and-review workflow. The automatic
-return path no longer opens that separate popup, so it cannot steal focus from
-the selected work target. The signed resource-monitor LaunchAgent remains
-process-focused and does not write to the vault or invoke the optional watcher.
+`maint shortcuts` remains the manual refresh-and-review workflow. The automatic return path does not open that separate popup, so it cannot steal focus from the selected work target.
+
+## Legacy watcher
+
+**Start / Restart Away-Return Review** starts `idle_watcher.py` only for legacy/manual compatibility. It is no longer required for automatic return routing and should not be enabled alongside the resident return detector merely to obtain the resume handoff. Starting the legacy watcher still intentionally runs one review immediately, and `maint status` can report whether that optional process is running.

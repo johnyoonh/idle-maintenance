@@ -79,6 +79,9 @@ def _default_state() -> dict[str, Any]:
         "notifications": {},
         "pending_prompts": [],
         "idle_armed": False,
+        "return_armed": False,
+        "last_return_flow_at": 0.0,
+        "return_health": {},
     }
 
 
@@ -96,7 +99,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     # windows so old state is compacted on the next write.
     base.pop("windows", None)
     for key, expected in (("incidents", list), ("active", dict), ("notifications", dict),
-                          ("pending_prompts", list), ("health", dict)):
+                          ("pending_prompts", list), ("health", dict), ("return_health", dict)):
         if not isinstance(base.get(key), expected):
             base[key] = expected()
     return base
@@ -169,6 +172,7 @@ class ResourceMonitor:
         notify_fn: Callable[[str, str], None] | None = None,
         prompt_fn: Callable[[dict[str, Any], dict[str, Any]], str] | None = None,
         identity_reader: Callable[[int], dict[str, Any] | None] = identity.read,
+        return_fn: Callable[[], Any] | None = None,
     ) -> None:
         self.config = config or load_config(os.path.dirname(__file__))
         self.state_path = Path(state_path)
@@ -177,6 +181,7 @@ class ResourceMonitor:
         self.notify_fn = notify_fn or self._notify_default
         self.prompt_fn = prompt_fn or self._prompt_default
         self.identity_reader = identity_reader
+        self.return_fn = return_fn or self._return_default
         self.state = _read_json(self.state_path)
         self._windows: dict[str, list[dict[str, Any]]] = {}
         health = self.state.get("health") if isinstance(self.state.get("health"), dict) else {}
@@ -234,6 +239,11 @@ class ResourceMonitor:
         handle_process_action(core, review_proc, action, self.config)
         return action
 
+    def _return_default(self) -> Any:
+        from idle_watcher import trigger_maintenance
+
+        return trigger_maintenance()
+
     def _persist(self, *, force: bool = False, now: float | None = None) -> bool:
         persisted_at = self.now_fn() if now is None else float(now)
         elapsed = persisted_at - self._last_persist_at
@@ -259,12 +269,17 @@ class ResourceMonitor:
         )
         prompt_health = self.state.get("prompt_health")
         prompt_error = prompt_health.get("last_error") if isinstance(prompt_health, dict) else None
+        return_health = self.state.get("return_health")
+        return_error = return_health.get("last_error") if isinstance(return_health, dict) else None
         return (
             tuple(sorted(self.state.get("active", {}).items())),
             tuple(self.state.get("pending_prompts", [])),
             bool(self.state.get("idle_armed")),
+            bool(self.state.get("return_armed")),
+            float(self.state.get("last_return_flow_at") or 0),
             incidents,
             prompt_error,
+            return_error,
         )
 
     def _history(self, event: str, incident: dict[str, Any], **fields: Any) -> None:
@@ -308,6 +323,7 @@ class ResourceMonitor:
         self.state["notifications"] = {
             key: value for key, value in notifications[-100:] if now - value <= cooldown * 2
         }
+
     def _qualified(self, interval: dict[str, Any]) -> bool:
         total_limit = float(self.config.get("process_high_io_total_mib_per_second", 20))
         write_limit = float(self.config.get("process_high_io_write_mib_per_second", 10))
@@ -467,20 +483,57 @@ class ResourceMonitor:
         ]
 
     def _handle_idle_return(self, idle_seconds: float, now: float) -> None:
-        if not self.state.get("pending_prompts"):
+        prompt_threshold = max(
+            0.0,
+            float(self.config.get("return_from_away_minutes", 15)),
+        ) * 60
+        return_threshold = max(
+            0.0,
+            float(self.config.get("idle_threshold_minutes", 10)),
+        ) * 60
+
+        if self.state.get("pending_prompts"):
+            if idle_seconds >= prompt_threshold:
+                self.state["idle_armed"] = True
+            elif self.state.get("idle_armed") and idle_seconds < 60:
+                self.state["idle_armed"] = False
+                for incident_id in list(self.state["pending_prompts"]):
+                    incident = self._incident_by_id(incident_id)
+                    if incident:
+                        self._deliver_prompt(incident, now)
+        else:
             self.state["idle_armed"] = False
+
+        if idle_seconds > return_threshold:
+            self.state["return_armed"] = True
             return
-        idle_threshold = float(self.config.get("return_from_away_minutes", 15)) * 60
-        if idle_seconds >= idle_threshold:
-            self.state["idle_armed"] = True
+        if not self.state.get("return_armed") or idle_seconds >= 30:
             return
-        if not self.state.get("idle_armed") or idle_seconds >= 60:
+
+        self.state["return_armed"] = False
+        cooldown = max(
+            0.0,
+            float(self.config.get("post_trigger_cooldown_seconds", 3600)),
+        )
+        last_triggered = float(self.state.get("last_return_flow_at") or 0)
+        if last_triggered and now - last_triggered < cooldown:
             return
-        self.state["idle_armed"] = False
-        for incident_id in list(self.state["pending_prompts"]):
-            incident = self._incident_by_id(incident_id)
-            if incident:
-                self._deliver_prompt(incident, now)
+
+        self.state["last_return_flow_at"] = now
+        try:
+            result = self.return_fn()
+        except Exception as error:
+            detail = str(error).strip() or type(error).__name__
+            self.state["return_health"] = {
+                "last_error": detail[:500],
+                "last_error_at": now,
+            }
+        else:
+            self.state["return_health"] = {
+                "last_error": "",
+                "last_success_at": now,
+                "fallback": bool(result.get("fallback")) if isinstance(result, dict) else False,
+            }
 
     def observe(
         self,
@@ -581,6 +634,7 @@ class ResourceMonitor:
 
         self._handle_idle_return(float(idle_seconds), observed_at)
         prompt_health = self.state.get("prompt_health") if isinstance(self.state.get("prompt_health"), dict) else {}
+        return_health = self.state.get("return_health") if isinstance(self.state.get("return_health"), dict) else {}
         new_error = "" if available else str(system_status.get("error") or "iostat unavailable")
         self.state["health"] = {
             "pid": os.getpid(),
@@ -594,6 +648,10 @@ class ResourceMonitor:
             "last_prompt_error": str(prompt_health.get("last_error") or ""),
             "last_prompt_error_at": prompt_health.get("last_error_at"),
             "last_prompt_success_at": prompt_health.get("last_success_at"),
+            "last_return_flow_at": self.state.get("last_return_flow_at"),
+            "last_return_error": str(return_health.get("last_error") or ""),
+            "last_return_error_at": return_health.get("last_error_at"),
+            "last_return_success_at": return_health.get("last_success_at"),
             "active_incidents": len(self.state["active"]),
             "pending_prompts": len(self.state["pending_prompts"]),
             "sampled_processes": len(current),
@@ -665,19 +723,11 @@ def run_monitor(
             )
             current = provider() if aggregate_hot else {}
 
-            needs_idle_poll = bool(
-                monitor.state.get("pending_prompts") or monitor.state.get("idle_armed")
-            )
-            idle_seconds = 0.0
-            if needs_idle_poll:
-                now_mono = monotonic_fn()
-                if now_mono >= next_idle_poll_at:
-                    cached_idle_seconds = idle_provider()
-                    next_idle_poll_at = now_mono + monitor.idle_poll_seconds
-                idle_seconds = cached_idle_seconds
-            else:
-                cached_idle_seconds = 0.0
-                next_idle_poll_at = 0.0
+            now_mono = monotonic_fn()
+            if now_mono >= next_idle_poll_at:
+                cached_idle_seconds = idle_provider()
+                next_idle_poll_at = now_mono + monitor.idle_poll_seconds
+            idle_seconds = cached_idle_seconds
 
             monitor.observe(
                 previous if aggregate_hot else {},
