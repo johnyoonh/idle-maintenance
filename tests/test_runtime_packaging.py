@@ -9,6 +9,7 @@ REQUIRED = (
     "process_triage.py",
     "prompt_session.py",
     "review_ui.py",
+    "resource_monitor.py",
 )
 
 
