@@ -164,14 +164,17 @@ def resource_monitor_status(
     state = load_json(support_dir / MONITOR_STATE, {})
     state = state if isinstance(state, dict) else {}
     health = state.get("health") if isinstance(state.get("health"), dict) else {}
+    return_health = state.get("return_health") if isinstance(state.get("return_health"), dict) else {}
     last_sample = float(health.get("last_sample_at", 0) or 0)
     interval = max(1.0, float(health.get("sample_interval_seconds", 10) or 10))
     stale_after = max(45.0, interval * 3)
     last_error = str(health.get("last_error") or "")
     last_prompt_error = str(health.get("last_prompt_error") or "")
+    last_return_error = str(return_health.get("last_error") or health.get("last_return_error") or "")
+    last_return_fallback = bool(return_health.get("fallback"))
     if not state:
         state_status = "not-started"
-    elif last_error or last_prompt_error:
+    elif last_error or last_prompt_error or last_return_error or last_return_fallback:
         state_status = "degraded"
     elif not last_sample or now - last_sample > stale_after:
         state_status = "stale"
@@ -196,6 +199,11 @@ def resource_monitor_status(
         "last_system_mib_s": health.get("last_system_mib_s"),
         "last_error": last_error,
         "last_prompt_error": last_prompt_error,
+        "last_return_flow_at": state.get("last_return_flow_at") or health.get("last_return_flow_at"),
+        "last_return_success_at": return_health.get("last_success_at") or health.get("last_return_success_at"),
+        "last_return_error": last_return_error,
+        "last_return_error_at": return_health.get("last_error_at") or health.get("last_return_error_at"),
+        "last_return_fallback": last_return_fallback,
         "active_incidents": len(active),
         "pending_prompts": len(pending),
         "sampled_processes": int(health.get("sampled_processes", 0) or 0),
@@ -212,6 +220,14 @@ def render_text(status: dict[str, Any]) -> str:
     queues = status["queues"]
     terminal = status["terminal_suggestions"]
     monitor_launch = monitor["launchd"]
+    if monitor["last_return_error"]:
+        return_summary = f"error: {monitor['last_return_error']}"
+    elif monitor["last_return_fallback"]:
+        return_summary = "fallback used on last return"
+    elif monitor["last_return_success_at"]:
+        return_summary = "coordinator completed on last return"
+    else:
+        return_summary = "waiting for first away-return"
     lines = [
         "Idle maintenance status",
         "",
@@ -225,6 +241,7 @@ def render_text(status: dict[str, Any]) -> str:
         f"- Active incidents: {monitor['active_incidents']}; queued review prompts: {monitor['pending_prompts']}",
         f"- Current sampling: {monitor['sampled_processes']} processes; {monitor['tracked_windows']} candidate windows",
         f"- Latest system sample: {monitor['last_system_mib_s'] if monitor['last_system_mib_s'] is not None else 'unavailable'} MiB/s",
+        f"- Resume routing: {return_summary}",
         f"- Attribution: {monitor['attribution_boundary']}",
         "",
         "Interactive review:",
