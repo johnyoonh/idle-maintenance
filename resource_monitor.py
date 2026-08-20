@@ -216,6 +216,7 @@ class ResourceMonitor:
 
     def _prompt_default(self, proc: dict[str, Any], incident: dict[str, Any]) -> str:
         import maintenance_interactive as core
+        from activity_intelligence import DB_PATH as INTELLIGENCE_DB_PATH, status as intelligence_status
         from process_review import handle_process_action, prompt_process
 
         review_proc = dict(proc)
@@ -226,6 +227,18 @@ class ResourceMonitor:
             f"peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s total, "
             f"{float(incident.get('peak_write_mib_s', 0)):.1f} MiB/s writes; {ATTRIBUTION_NOTE}"
         )
+        try:
+            intelligence = intelligence_status(
+                Path(os.path.expanduser(str(self.config.get("activity_intelligence_db_path", INTELLIGENCE_DB_PATH))))
+            )
+            latest = intelligence.get("latest") if isinstance(intelligence, dict) else None
+            event_id = f"idle-maintenance:{incident.get('id')}"
+            if isinstance(latest, dict) and event_id in latest.get("event_ids", []):
+                remedy = " ".join(str(latest.get("response") or "").split())
+                if remedy:
+                    review_proc["reason"] += f" Smart pattern suggestion: {remedy[:800]}"
+        except Exception:
+            pass
         review_proc["io_samples"] = [
             {
                 "total_mib_s": float(incident.get("peak_total_mib_s", 0)),
@@ -554,7 +567,7 @@ class ResourceMonitor:
         seconds: float | None = None,
         idle_seconds: float | None = None,
         now: float | None = None,
-    ) -> None:
+    ) -> bool:
         """Consume one interval and persist lifecycle changes immediately, heartbeats at a bounded cadence."""
         observed_at = self.now_fn() if now is None else float(now)
         elapsed = self.interval_seconds if seconds is None else float(seconds)
@@ -687,6 +700,7 @@ class ResourceMonitor:
         self._prune(observed_at)
         force_persist = before_events != self._event_signature() or previous_error != new_error
         self._persist(force=force_persist, now=observed_at)
+        return force_persist
 
 
 def acquire_single_instance(path: Path) -> Any | None:
@@ -751,13 +765,20 @@ def run_monitor(
                 next_idle_poll_at = now_mono + monitor.idle_poll_seconds
             idle_seconds = cached_idle_seconds
 
-            monitor.observe(
+            lifecycle_changed = monitor.observe(
                 previous if aggregate_hot else {},
                 current,
                 status,
                 seconds=monitor.interval_seconds,
                 idle_seconds=idle_seconds,
             )
+            if lifecycle_changed is True and bool(cfg.get("activity_intelligence_enabled", True)):
+                try:
+                    from activity_intelligence import launch_cycle
+
+                    launch_cycle(cfg, base_dir=os.path.dirname(__file__))
+                except Exception:
+                    pass
             previous = current if aggregate_hot else {}
             if once:
                 break

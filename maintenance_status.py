@@ -226,6 +226,7 @@ def render_text(status: dict[str, Any]) -> str:
     monitor = status["resource_monitor"]
     queues = status["queues"]
     terminal = status["terminal_suggestions"]
+    intelligence = status.get("pattern_intelligence", {})
     monitor_launch = monitor["launchd"]
     if not monitor["return_routing_enabled"]:
         return_summary = "disabled by configuration"
@@ -268,6 +269,23 @@ def render_text(status: dict[str, Any]) -> str:
             f"- Incident {incident.get('process', 'process')} PID {incident.get('pid', '?')}: "
             f"{incident.get('status', 'unknown')}, peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s"
         )
+    latest_diagnosis = intelligence.get("latest") if isinstance(intelligence, dict) else None
+    health = intelligence.get("health") if isinstance(intelligence, dict) else {}
+    lines.extend(
+        [
+            "",
+            "Pattern intelligence:",
+            f"- Vector backend: {health.get('vector_backend') or 'not-started'}; stored events: {intelligence.get('events', 0)}; pending spikes: {intelligence.get('pending_spikes', 0)}",
+            f"- Worker error: {health.get('last_error') or health.get('embedding_error') or 'none'}",
+        ]
+    )
+    if isinstance(latest_diagnosis, dict):
+        structured = latest_diagnosis.get("diagnosis") if isinstance(latest_diagnosis.get("diagnosis"), dict) else {}
+        confidence = structured.get("confidence")
+        lines.append(
+            f"- Latest remedy{f' ({float(confidence):.0%} confidence)' if confidence is not None else ''}: "
+            f"{' '.join(str(latest_diagnosis.get('response') or '').split())[:300]}"
+        )
     runner_output = runner.get("status_output", "").strip()
     if runner_output:
         lines.extend(["", "Runner details:", runner_output])
@@ -306,6 +324,18 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             raise ValueError
     except (TypeError, ValueError):
         start, end = 9, 21
+    try:
+        from activity_intelligence import status as intelligence_status
+
+        pattern_intelligence = intelligence_status(support_dir / "activity-intelligence.sqlite3")
+    except Exception as error:
+        pattern_intelligence = {
+            "events": 0,
+            "stored_diagnoses": 0,
+            "pending_spikes": 0,
+            "latest": None,
+            "health": {"last_error": str(error)[:500], "vector_backend": "unavailable"},
+        }
     status = {
         "runner": {
             **launch_status,
@@ -314,6 +344,7 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             "status_error": status_error,
         },
         "resource_monitor": resource_monitor_status(support_dir, monitor_launch, now),
+        "pattern_intelligence": pattern_intelligence,
         "latest_event": latest_log_event(log_path),
         "queues": queue_status(config, support_dir, now),
         "terminal_suggestions": {
