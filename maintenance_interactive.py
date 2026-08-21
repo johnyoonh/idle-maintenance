@@ -159,6 +159,11 @@ def _run_app_review() -> Any:
                 stale_apps.append(line)
                 stale_dates[line] = "Unknown"
 
+        # A durable pending/running action is already a final decision for this audit.
+        # Do not surface the same app again while that action is still active.
+        active_action_paths = _app_actions.active_action_paths()
+        stale_apps = [path for path in stale_apps if path not in active_action_paths]
+
         max_prompts = min(int(config.get("max_prompts", _core.DEFAULT_MAX_PROMPTS)), remaining_prompts)
         close_on_unfocus = False
         app_snooze_hours = max(0.0, float(config.get("app_snooze_hours", 720)))
