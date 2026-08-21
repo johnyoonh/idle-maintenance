@@ -143,8 +143,27 @@ def enqueue_trash_action(
         "result": {},
     }
     with _locked_state(state_path, lock_path=lock_path, now=requested) as state:
+        for existing in state["jobs"]:
+            if existing.get("state") in ACTIVE_STATES and existing.get("app_path") == path:
+                return dict(existing)
         state["jobs"].append(job)
     return dict(job)
+
+
+def active_action_paths(
+    *,
+    state_path: str = STATE_PATH,
+    lock_path: str | None = None,
+    now: float | None = None,
+) -> set[str]:
+    """Return apps already committed to destructive background processing."""
+    current = time.time() if now is None else float(now)
+    with _locked_state(state_path, lock_path=lock_path, now=current) as state:
+        return {
+            str(job.get("app_path"))
+            for job in state["jobs"]
+            if job.get("state") in ACTIVE_STATES and job.get("app_path")
+        }
 
 
 def _claim_next_job(
