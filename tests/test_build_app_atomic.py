@@ -44,7 +44,7 @@ printf new > "$app/new-marker"
         )
         (source / "build_app_core.sh").chmod(0o755)
         for name in (
-            "activity_intelligence.py", "maintenance_core.py", "process_identity.py",
+            "activity_intelligence.py", "app_actions.py", "maintenance_core.py", "process_identity.py",
             "process_sampling.py", "process_triage.py", "process_review.py", "prompt_session.py",
             "review_ui.py", "storage_cleanup_core.py", "disk_activity.py", "maint.py",
             "resource_monitor.py", "shortcut_review.py", "maintenance_status_extended.py",

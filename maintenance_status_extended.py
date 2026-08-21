@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import maintenance_status as base
+from app_actions import app_action_status
 from shortcut_review import normalize_command
 
 WATCHER_PATTERN = "[i]dle_watcher.py"
@@ -55,9 +56,28 @@ def away_return_review_status(
     }
 
 
+def _action_detail(job: dict[str, Any] | None) -> str:
+    if not job:
+        return "none"
+    name = Path(str(job.get("app_path") or "application")).name
+    outcome = str((job.get("result") or {}).get("outcome") or job.get("state") or "unknown")
+    finished = float(job.get("finished_at") or 0)
+    finished_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(finished)) if finished else "unknown time"
+    return f"{name} — {outcome} at {finished_text}"
+
+
 def render_text(status: dict[str, Any]) -> str:
+    actions = status["app_actions"]
+    app_action_section = [
+        "App actions:",
+        f"- Queue: {actions['queued']} queued • {actions['running']} running • {actions['failed']} failed",
+        f"- Most recent completion: {_action_detail(actions.get('most_recent_completion'))}",
+    ]
+    if actions.get("most_recent_failure"):
+        app_action_section.append(f"- Most recent failure: {_action_detail(actions['most_recent_failure'])}")
+
     watcher = status["away_return_review"]
-    section = [
+    watcher_section = [
         "Away-return review (optional):",
         f"- State: {watcher['summary']}",
         (
@@ -72,8 +92,9 @@ def render_text(status: dict[str, Any]) -> str:
         ),
     ]
     if watcher.get("error"):
-        section.append(f"- Status error: {watcher['error']}")
+        watcher_section.append(f"- Status error: {watcher['error']}")
 
+    section = app_action_section + [""] + watcher_section
     base_text = str(status.get("text") or "").rstrip()
     marker = "\n\nRunner details:"
     if marker in base_text:
@@ -99,6 +120,8 @@ def collect_status(
         home=root,
         now=current,
     )
+    action_state_path = root / "Library" / "Application Support" / "idle-maintenance" / "app-actions.json"
+    status["app_actions"] = app_action_status(state_path=str(action_state_path), now=current)
     status["away_return_review"] = away_return_review_status(
         config,
         command_runner=command_runner,

@@ -330,6 +330,18 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    func openCurrentApp() {
+        guard mode != "process" else { return }
+        canCloseOnUnfocus = false
+        let opened = NSWorkspace.shared.open(URL(fileURLWithPath: itemPath))
+        if opened {
+            feedbackLabel?.stringValue = "Opened—choose Keep, Snooze, or Move to Trash."
+        } else {
+            feedbackLabel?.stringValue = "Could not open this application; choose Keep, Snooze, or Move to Trash."
+            canCloseOnUnfocus = true
+        }
+    }
+
     func perform(_ action: PromptAction) {
         guard !waitingForNext else { return }
         if action.result == "DELETE" && !deleteEnabled { return }
@@ -337,12 +349,16 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             copyInvestigationPrompt()
             return
         }
+        if action.result == "TRY" && mode != "process" {
+            openCurrentApp()
+            return
+        }
         if let confirmation = action.confirmation {
             let alert = NSAlert()
             alert.alertStyle = action.result == "DELETE" ? .critical : .warning
             alert.messageText = confirmation
             alert.informativeText = action.result == "DELETE"
-                ? "The application will be moved to Trash and recorded in the deletion ledger."
+                ? "The application will be queued, revalidated, moved to Trash, and recorded in the deletion ledger."
                 : "The process identity will be revalidated before a graceful quit signal is sent."
             alert.addButton(withTitle: "Cancel")
             alert.addButton(withTitle: action.result == "DELETE" ? "Move to Trash" : "Quit App")
