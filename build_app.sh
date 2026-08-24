@@ -5,6 +5,7 @@ SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST_DIR="${1:-$HOME/Applications}"
 APP_PATH="$DEST_DIR/IdleMaintenance.app"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+XCRUN="${XCRUN:-/usr/bin/xcrun}"
 
 if [ "$#" -gt 1 ]; then
   echo "Usage: $0 [destination-directory]" >&2
@@ -53,6 +54,11 @@ CODESIGN_IDENTITY="$CODESIGN_IDENTITY" "$TMP_CORE" "$STAGE_ROOT"
 
 RES_DIR="$STAGED_APP/Contents/Resources/maintenance"
 cp "$SRC_DIR"/{activity_intelligence.py,app_actions.py,maintenance_core.py,process_identity.py,process_sampling.py,process_triage.py,process_review.py,prompt_session.py,review_ui.py,resource_monitor.py,storage_cleanup_core.py,disk_activity.py,maint.py,shortcut_review.py,maintenance_status_extended.py} "$RES_DIR/"
+
+# Compile the AppKit review helper before signing so normal launches never pay
+# Swift interpreter startup cost or compile while the user is choosing actions.
+"$XCRUN" swiftc -O -framework AppKit "$SRC_DIR/prompt.swift" -o "$RES_DIR/IdleMaintenancePrompt"
+chmod +x "$RES_DIR/IdleMaintenancePrompt"
 
 codesign --force --deep --sign "$CODESIGN_IDENTITY" "$STAGED_APP" >/dev/null
 codesign --verify --deep --strict "$STAGED_APP"

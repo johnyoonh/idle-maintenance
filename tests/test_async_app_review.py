@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import tempfile
 import unittest
@@ -114,6 +115,55 @@ class AsyncAppReviewTests(unittest.TestCase):
     def test_process_review_entrypoint_is_not_replaced(self):
         source = Path(maintenance.__file__).read_text(encoding="utf-8")
         self.assertIn('if len(sys.argv) > 1 and sys.argv[1] == "--process-audit":\n            _result = _core.main()', source)
+
+    def test_app_audit_snapshot_is_reused_and_finishes_before_first_prompt(self):
+        events = []
+        audit = Mock()
+        audit.return_value.returncode = 0
+        audit.return_value.stdout = "/Applications/Demo.app|2025-01-01\n"
+
+        def run_audit(*_args, **_kwargs):
+            events.append("audit")
+            return audit.return_value
+
+        def process_audit(_config, **kwargs):
+            events.append("process")
+            self.assertEqual(
+                kwargs["planned_app_output"],
+                ["/Applications/Demo.app|2025-01-01"],
+            )
+            return True, 0
+
+        def prompt(*_args, **_kwargs):
+            events.append("prompt")
+            return "KEEP"
+
+        config = {"max_prompts": 1, "max_entries_per_idle_return": 1}
+        with (
+            patch.object(maintenance, "_interactive_lock", return_value=contextlib.nullcontext(True)),
+            patch.object(maintenance, "load_config", return_value=config),
+            patch.object(maintenance.subprocess, "run", side_effect=run_audit) as runner,
+            patch.object(maintenance._app_actions, "launch_worker", return_value=True),
+            patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
+            patch.object(maintenance._core, "run_process_audit", side_effect=process_audit),
+            patch.object(maintenance._core, "load_json", return_value=[]),
+            patch.object(maintenance._core, "load_custom_whitelist", return_value={}),
+            patch.object(maintenance._core, "queue_item_is_snoozed", return_value=False),
+            patch.object(maintenance._core, "app_usage_detail", return_value="detail"),
+            patch.object(
+                maintenance._core,
+                "get_restore_source",
+                return_value={"source": "brew", "restore_command": "brew install --cask demo"},
+            ),
+            patch.object(maintenance._core, "app_cleanup_config", return_value=({}, None)),
+            patch.object(maintenance._core, "prompt_user", side_effect=prompt),
+            patch.object(maintenance._core, "record_keep", side_effect=lambda state, path: state.update({path: 1})),
+            patch.object(maintenance._core, "save_json", return_value=True),
+        ):
+            maintenance._run_app_review()
+
+        runner.assert_called_once()
+        self.assertEqual(events, ["audit", "process", "prompt"])
 
 
 if __name__ == "__main__":

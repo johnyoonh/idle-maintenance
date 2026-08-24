@@ -134,16 +134,36 @@ def _run_app_review() -> Any:
         max_entries = int(config.get("max_entries_per_idle_return", config.get("max_prompts", _core.DEFAULT_MAX_PROMPTS)))
         max_entries = max(0, max_entries)
 
-        process_ok, process_prompts = _core.run_process_audit(config, prompt_budget=max_entries)
+        # Complete bounded discovery before opening the persistent review helper.
+        # The same snapshot supplies process-stage pending counts and app reviews.
+        auditor_path = os.path.join(_core.BASE_DIR, "app_auditor.py")
+        try:
+            result = subprocess.run(
+                ["/usr/bin/python3", auditor_path],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=7,
+            )
+            stale_output = result.stdout.splitlines() if result.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError):
+            stale_output = []
+
+        active_action_paths = _app_actions.active_action_paths()
+        stale_output = [
+            line
+            for line in stale_output
+            if (line.split("|", 1)[0] if "|" in line else line) not in active_action_paths
+        ]
+
+        process_ok, process_prompts = _core.run_process_audit(
+            config,
+            prompt_budget=max_entries,
+            planned_app_output=stale_output,
+        )
         if not process_ok:
             return None
         remaining_prompts = max(0, max_entries - process_prompts)
-
-        auditor_path = os.path.join(_core.BASE_DIR, "app_auditor.py")
-        try:
-            stale_output = subprocess.check_output(["/usr/bin/python3", auditor_path], text=True).splitlines()
-        except (OSError, subprocess.SubprocessError):
-            stale_output = []
 
         stale_apps: list[str] = []
         stale_dates: dict[str, str] = {}
@@ -161,7 +181,6 @@ def _run_app_review() -> Any:
 
         # A durable pending/running action is already a final decision for this audit.
         # Do not surface the same app again while that action is still active.
-        active_action_paths = _app_actions.active_action_paths()
         stale_apps = [path for path in stale_apps if path not in active_action_paths]
 
         max_prompts = min(int(config.get("max_prompts", _core.DEFAULT_MAX_PROMPTS)), remaining_prompts)

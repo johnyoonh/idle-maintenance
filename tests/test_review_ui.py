@@ -1,6 +1,9 @@
 import io
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -45,6 +48,33 @@ class PromptSessionTests(unittest.TestCase):
         runner.assert_called_once()
         requests = [json.loads(line) for line in fake.stdin.getvalue().splitlines()]
         self.assertEqual([item["name"] for item in requests], ["one", "two"])
+
+    def test_precompiled_prompt_helper_is_preferred(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = Path(tmp) / prompt_session.PROMPT_HELPER_NAME
+            helper.write_text("helper", encoding="utf-8")
+            helper.chmod(0o755)
+            self.assertEqual(prompt_session.prompt_command(tmp), [str(helper)])
+
+    def test_source_prompt_is_compiled_once_into_content_addressed_cache(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as home:
+            source = Path(tmp) / "prompt.swift"
+            source.write_text("import AppKit\n", encoding="utf-8")
+            compiler = Mock()
+
+            def compile_helper(command, **_kwargs):
+                output = Path(command[command.index("-o") + 1])
+                output.write_text("compiled", encoding="utf-8")
+                return SimpleNamespace(returncode=0)
+
+            compiler.side_effect = compile_helper
+            with patch.dict(os.environ, {"HOME": home}):
+                first = prompt_session.prompt_command(tmp, compiler_runner=compiler)
+                second = prompt_session.prompt_command(tmp, compiler_runner=compiler)
+
+            self.assertEqual(first, second)
+            self.assertEqual(Path(first[0]).read_text(encoding="utf-8"), "compiled")
+            compiler.assert_called_once()
 
     def test_close_is_safe_after_session_failure(self):
         fake = FakeProcess([])
@@ -145,10 +175,17 @@ class ReviewUiTests(unittest.TestCase):
         )
         config = {"max_prompts": 5, "app_snooze_hours": 720}
         output = "/one.app|2026-01-01\n/two.app|2026-01-01\n/three.app|2026-01-01\n"
-        with patch("review_ui.subprocess.check_output", return_value=output):
-            pending = review_ui._planned_app_reviews(core, config, process_pending=2, prompt_budget=5)
+        with patch("review_ui.subprocess.run") as runner:
+            pending = review_ui._planned_app_reviews(
+                core,
+                config,
+                process_pending=2,
+                prompt_budget=5,
+                stale_output=output.splitlines(),
+            )
 
         self.assertEqual(pending, 2)
+        runner.assert_not_called()
 
 
 if __name__ == "__main__":

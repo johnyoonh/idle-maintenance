@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DEST="$HOME/Library/Scripts/idle-maintenance"
+XCRUN="${XCRUN:-/usr/bin/xcrun}"
 mkdir -p "$DEST"
 
 echo "Deploying Idle Maintenance to $DEST..."
@@ -30,6 +31,18 @@ cp shortcut_review.py "$DEST/"
 cp storage_cleanup.py "$DEST/"
 cp storage_cleanup_core.py "$DEST/"
 cp disk_activity.py "$DEST/"
+
+# Prefer a precompiled helper while retaining prompt.swift as the runtime
+# fallback for systems where the compiler is unavailable.
+PROMPT_HELPER_TMP="$DEST/.IdleMaintenancePrompt.tmp.$$"
+if "$XCRUN" --find swiftc >/dev/null 2>&1; then
+  "$XCRUN" swiftc -O -framework AppKit prompt.swift -o "$PROMPT_HELPER_TMP"
+  chmod +x "$PROMPT_HELPER_TMP"
+  mv -f -- "$PROMPT_HELPER_TMP" "$DEST/IdleMaintenancePrompt"
+else
+  rm -f -- "$DEST/IdleMaintenancePrompt"
+  echo "Warning: swiftc unavailable; review UI will use prompt.swift." >&2
+fi
 
 # Preserve local settings and state.
 cp -n config.json "$DEST/" 2>/dev/null || true

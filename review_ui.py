@@ -135,7 +135,13 @@ def _pending_app_reviews(core: Any) -> int:
     return 0
 
 
-def _planned_app_reviews(core: Any, config: dict[str, Any], process_pending: int, prompt_budget: int | None) -> int:
+def _planned_app_reviews(
+    core: Any,
+    config: dict[str, Any],
+    process_pending: int,
+    prompt_budget: int | None,
+    stale_output: list[str] | None = None,
+) -> int:
     """Count app approvals expected after the process stage within this run's budget."""
     if prompt_budget is None:
         return 0
@@ -147,11 +153,19 @@ def _planned_app_reviews(core: Any, config: dict[str, Any], process_pending: int
     if app_limit <= 0:
         return 0
 
-    auditor_path = os.path.join(core.BASE_DIR, "app_auditor.py")
-    try:
-        stale_output = subprocess.check_output(["/usr/bin/python3", auditor_path], text=True).splitlines()
-    except (OSError, subprocess.SubprocessError):
-        return 0
+    if stale_output is None:
+        auditor_path = os.path.join(core.BASE_DIR, "app_auditor.py")
+        try:
+            result = subprocess.run(
+                ["/usr/bin/python3", auditor_path],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=7,
+            )
+            stale_output = result.stdout.splitlines() if result.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError):
+            return 0
 
     stale_apps = []
     for line in stale_output:
@@ -206,6 +220,7 @@ def run_process_audit(
     pr: Any,
     config: dict[str, Any],
     prompt_budget: int | None = None,
+    planned_app_output: list[str] | None = None,
 ) -> tuple[bool, int]:
     """Process audit with an exact pending count for the complete current run."""
     limit = int(config.get("process_max_prompts", core.DEFAULT_MAX_PROMPTS))
@@ -256,7 +271,13 @@ def run_process_audit(
         if by_key.get(item.get("process_key")) and not core.queue_item_is_snoozed(item, snooze)
     ]
     process_pending = min(limit, len(reviewable))
-    app_pending = _planned_app_reviews(core, config, process_pending, prompt_budget)
+    app_pending = _planned_app_reviews(
+        core,
+        config,
+        process_pending,
+        prompt_budget,
+        stale_output=planned_app_output,
+    )
     run_pending = process_pending + app_pending
 
     for item in queue:
@@ -303,7 +324,7 @@ def install(core: Any, process_review_module: Any) -> None:
     core.prompt_process = lambda proc, snooze_hours=24, keep_days=1: prompt_process(
         core, pr, proc, snooze_hours, keep_days
     )
-    core.run_process_audit = lambda config, prompt_budget=None: run_process_audit(
-        core, pr, config, prompt_budget
+    core.run_process_audit = lambda config, prompt_budget=None, planned_app_output=None: run_process_audit(
+        core, pr, config, prompt_budget, planned_app_output
     )
     core._PERSISTENT_REVIEW_UI_INSTALLED = True

@@ -55,11 +55,28 @@ printf new > "$app/new-marker"
             encoding="utf-8",
         )
         (fake_bin / "codesign").chmod(0o755)
+        (fake_bin / "xcrun").write_text(
+            "#!/bin/bash\n"
+            "[[ ${FAIL_SWIFTC:-0} != 1 ]] || exit 43\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ $1 == -o ]]; then printf helper > \"$2\"; chmod +x \"$2\"; exit 0; fi\n"
+            "  shift\n"
+            "done\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "xcrun").chmod(0o755)
+        (source / "prompt.swift").write_text("// fixture\n", encoding="utf-8")
         (source / "build_app.sh").chmod(0o755)
         return source, destination, fake_bin
 
     def run_build(self, source: Path, destination: Path, fake_bin: Path, **extra):
-        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}", **extra)
+        env = dict(
+            os.environ,
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+            XCRUN=str(fake_bin / "xcrun"),
+            **extra,
+        )
         return subprocess.run(
             [str(source / "build_app.sh"), str(destination)],
             env=env,
@@ -97,6 +114,14 @@ printf new > "$app/new-marker"
             source, destination, fake_bin = self.fixture(Path(tmp))
             app = self.install_old(destination)
             result = self.run_build(source, destination, fake_bin, FAIL_CODESIGN="1")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((app / "old-marker").exists())
+
+    def test_prompt_compile_failure_preserves_installed_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, destination, fake_bin = self.fixture(Path(tmp))
+            app = self.install_old(destination)
+            result = self.run_build(source, destination, fake_bin, FAIL_SWIFTC="1")
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((app / "old-marker").exists())
 

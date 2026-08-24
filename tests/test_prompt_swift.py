@@ -29,6 +29,17 @@ class PromptSwiftTests(unittest.TestCase):
         self.assertIn(branch, text)
         self.assertLess(text.index(branch), text.index("finish(action.result)", text.index("func perform")))
 
+    def test_transition_never_swallows_keyboard_and_escape_always_closes(self):
+        text = (ROOT / "prompt.swift").read_text(encoding="utf-8")
+        monitor = text[text.index("func installKeyMonitor()"):text.index("func showLoadingWindow()")]
+        escape = 'if key == "\\u{1b}" { self.onClose(); return nil }'
+        state_guard = "guard self.reviewState == .reviewing else { return event }"
+        self.assertIn(escape, monitor)
+        self.assertIn(state_guard, monitor)
+        self.assertLess(monitor.index(escape), monitor.index(state_guard))
+        self.assertNotIn("waitingForNext", text)
+        self.assertIn("Escape or Command-W remains available.", text)
+
 
 if __name__ == "__main__":
     unittest.main()
