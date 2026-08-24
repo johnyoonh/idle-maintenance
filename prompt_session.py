@@ -2,11 +2,85 @@
 from __future__ import annotations
 
 import atexit
+import fcntl
+import hashlib
 import json
 import os
 import subprocess
 import threading
 from typing import Any
+
+
+PROMPT_HELPER_NAME = "IdleMaintenancePrompt"
+PROMPT_COMPILE_TIMEOUT_SECONDS = 120
+
+
+def prompt_command(base_dir: str, compiler_runner=subprocess.run) -> list[str]:
+    """Return a precompiled prompt command, compiling a source checkout once if needed."""
+    bundled_helper = os.path.join(base_dir, PROMPT_HELPER_NAME)
+    if os.access(bundled_helper, os.X_OK):
+        return [bundled_helper]
+
+    script_path = os.path.join(base_dir, "prompt.swift")
+    if not os.path.isfile(script_path):
+        return ["swift", script_path]
+
+    try:
+        with open(script_path, "rb") as source:
+            digest = hashlib.sha256(source.read()).hexdigest()
+    except OSError:
+        return ["swift", script_path]
+
+    cache_root = os.path.join(
+        os.path.expanduser("~/Library/Caches/idle-maintenance/prompt"),
+        digest,
+    )
+    cached_helper = os.path.join(cache_root, PROMPT_HELPER_NAME)
+    if os.access(cached_helper, os.X_OK):
+        return [cached_helper]
+
+    try:
+        os.makedirs(cache_root, exist_ok=True)
+    except OSError:
+        return ["swift", script_path]
+    lock_path = os.path.join(cache_root, ".compile.lock")
+    temporary_helper = f"{cached_helper}.tmp.{os.getpid()}"
+    try:
+        with open(lock_path, "a", encoding="utf-8") as compile_lock:
+            fcntl.flock(compile_lock.fileno(), fcntl.LOCK_EX)
+            if os.access(cached_helper, os.X_OK):
+                return [cached_helper]
+            try:
+                completed = compiler_runner(
+                    [
+                        "/usr/bin/xcrun",
+                        "swiftc",
+                        "-O",
+                        "-framework",
+                        "AppKit",
+                        script_path,
+                        "-o",
+                        temporary_helper,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=PROMPT_COMPILE_TIMEOUT_SECONDS,
+                )
+                if completed.returncode == 0 and os.path.isfile(temporary_helper):
+                    os.chmod(temporary_helper, 0o755)
+                    os.replace(temporary_helper, cached_helper)
+                    return [cached_helper]
+            except (OSError, subprocess.SubprocessError):
+                pass
+            finally:
+                try:
+                    os.unlink(temporary_helper)
+                except FileNotFoundError:
+                    pass
+    except OSError:
+        pass
+    return ["swift", script_path]
 
 
 class PromptSession:
@@ -15,6 +89,7 @@ class PromptSession:
     def __init__(self, base_dir: str, runner=subprocess.Popen):
         self.base_dir = base_dir
         self.runner = runner
+        self.command: list[str] | None = None
         self.process: subprocess.Popen[str] | None = None
         self.lock = threading.RLock()
 
@@ -26,8 +101,10 @@ class PromptSession:
         process = self.process
         if process is not None and process.poll() is None:
             return process
+        if self.command is None:
+            self.command = prompt_command(self.base_dir)
         process = self.runner(
-            ["swift", self.script_path, "--session"],
+            [*self.command, "--session"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -93,8 +170,7 @@ def get_session(base_dir: str) -> PromptSession:
 def legacy_prompt(base_dir: str, payload: dict[str, Any]) -> str:
     """Fallback to the historical one-window-per-question invocation."""
     command = [
-        "swift",
-        os.path.join(base_dir, "prompt.swift"),
+        *prompt_command(base_dir),
         str(payload.get("name", "")),
         str(payload.get("path", "")),
         str(bool(payload.get("closeOnUnfocus", False))).lower(),

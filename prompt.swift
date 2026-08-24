@@ -9,6 +9,12 @@ struct PromptAction {
     let confirmation: String?
 }
 
+enum ReviewState: Equatable {
+    case loading
+    case reviewing
+    case transitioning
+}
+
 struct ReviewPayload: Decodable {
     let name: String
     let path: String
@@ -51,7 +57,8 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem?
     var feedbackLabel: NSTextField?
     var didFinish = false
-    var waitingForNext = false
+    var reviewState: ReviewState = .loading
+    var transitionGeneration = 0
     var keyMonitor: Any?
 
     init(sessionMode: Bool, name: String = "", path: String = "") {
@@ -155,9 +162,9 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard !self.waitingForNext,
-                  let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
+            guard let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
             if key == "\u{1b}" { self.onClose(); return nil }
+            guard self.reviewState == .reviewing else { return event }
             if let action = self.actions().first(where: { $0.key == key }) {
                 self.perform(action)
                 return nil
@@ -172,6 +179,7 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showLoadingWindow() {
+        reviewState = .loading
         let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
         let label = NSTextField(labelWithString: "Loading maintenance review…")
         label.font = .systemFont(ofSize: 15, weight: .medium)
@@ -266,7 +274,8 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             content.addSubview(button)
         }
 
-        waitingForNext = false
+        reviewState = .reviewing
+        transitionGeneration += 1
         canCloseOnUnfocus = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -291,6 +300,30 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         deleteEnabled = !detailText.contains("delete disabled")
         setupMenuBar()
         setupWindow()
+    }
+
+    func setActionControlsEnabled(_ enabled: Bool) {
+        window.contentView?.subviews.compactMap { $0 as? ActionButton }.forEach { button in
+            button.isEnabled = enabled && (button.result != "DELETE" || deleteEnabled)
+        }
+        statusItem?.menu?.items.forEach { item in
+            guard item.representedObject is String else { return }
+            item.isEnabled = enabled
+        }
+    }
+
+    func beginTransition() {
+        reviewState = .transitioning
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        setActionControlsEnabled(false)
+        feedbackLabel?.stringValue = "Preparing next review… Escape or Command-W remains available."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard !self.didFinish,
+                  self.reviewState == .transitioning,
+                  self.transitionGeneration == generation else { return }
+            self.feedbackLabel?.stringValue = "Next review is delayed. Press Escape or Command-W to close."
+        }
     }
 
     func startSessionReader() {
@@ -343,7 +376,7 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func perform(_ action: PromptAction) {
-        guard !waitingForNext else { return }
+        guard reviewState == .reviewing else { return }
         if action.result == "DELETE" && !deleteEnabled { return }
         if action.result == "COPY" {
             copyInvestigationPrompt()
@@ -387,9 +420,15 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func finish(_ result: String) {
         guard !didFinish else { return }
+        if result == "QUIT" {
+            didFinish = true
+            emit(result)
+            NSApp.terminate(nil)
+            return
+        }
+        guard reviewState == .reviewing else { return }
         if sessionMode && result != "QUIT" {
-            waitingForNext = true
-            feedbackLabel?.stringValue = "Applying…"
+            beginTransition()
             emit(result)
             return
         }
