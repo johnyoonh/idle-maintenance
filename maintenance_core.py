@@ -190,38 +190,17 @@ def run_osascript(script, args):
         text=True,
     )
 
-def trash_with_finder(app_path):
-    script = '''
-on run argv
-    set appPath to item 1 of argv
-    tell application "Finder"
-        delete POSIX file appPath
-    end tell
-    return "true"
-end run
-'''
-    result = run_osascript(script, [app_path])
-    if result.returncode == 0 and "true" in result.stdout.lower():
-        return True
-    details = (result.stderr or result.stdout).strip()
-    log(f"Finder failed to trash {app_path}: {details}")
-    return False
-
 def trash_with_admin_mv(app_path, dest_path):
     script = '''
 on run argv
     set appPath to item 1 of argv
     set destPath to item 2 of argv
-    set userName to item 3 of argv
-    set groupName to item 4 of argv
-    set shellCommand to "mkdir -p " & quoted form of POSIX path of (path to trash folder) & " && mv " & quoted form of appPath & " " & quoted form of destPath & " && chown -R " & quoted form of (userName & ":" & groupName) & " " & quoted form of destPath
+    set shellCommand to "mkdir -p " & quoted form of POSIX path of (path to trash folder) & " && mv " & quoted form of appPath & " " & quoted form of destPath
     do shell script shellCommand with administrator privileges
     return "true"
 end run
 '''
-    user_name = os.getenv("USER", "")
-    group_name = subprocess.check_output(["id", "-gn"], text=True).strip()
-    result = run_osascript(script, [app_path, dest_path, user_name, group_name])
+    result = run_osascript(script, [app_path, dest_path])
     if result.returncode == 0 and "true" in result.stdout.lower():
         return True
     details = (result.stderr or result.stdout).strip()
@@ -755,12 +734,13 @@ def delete_app(app_path, config):
         run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
         return True
     except Exception as e:
-        log(f"Failed to trash {app_path} via shutil (falling back to AppleScript): {e}")
-        success = trash_with_finder(app_path)
-        if not success:
-            success = trash_with_admin_mv(app_path, dest_path)
+        log(
+            f"Failed to trash {app_path} via shutil; "
+            f"skipping Finder automation and trying a privileged move: {e}"
+        )
+        success = trash_with_admin_mv(app_path, dest_path)
         if success:
-            ledger_entry["action"] = "applescript-trash"
+            ledger_entry["action"] = "admin-trash"
             append_jsonl(ledger_path, ledger_entry)
             run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
         else:

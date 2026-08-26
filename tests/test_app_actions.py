@@ -272,7 +272,7 @@ class DeleteCompatibilityTests(unittest.TestCase):
             self.assertTrue(app.exists())
             self.assertIn("hook vetoed", notify.call_args.args[1])
 
-    def test_permission_failure_uses_fallbacks_then_notifies_without_retry(self):
+    def test_permission_failure_skips_finder_and_notifies_after_admin_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = Path(tmp) / "Demo.app"
             app.mkdir()
@@ -285,14 +285,16 @@ class DeleteCompatibilityTests(unittest.TestCase):
             ), patch.object(maintenance_core.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(
                 maintenance_core.time, "sleep", return_value=None
             ), patch.object(shutil, "move", side_effect=PermissionError("denied")), patch.object(
-                maintenance_core, "trash_with_finder", return_value=False
-            ) as finder, patch.object(
                 maintenance_core, "trash_with_admin_mv", return_value=False
             ) as admin, patch.object(maintenance_core, "notify_user") as notify:
                 self.assertFalse(maintenance_core.delete_app(str(app), self.config(str(Path(tmp) / "ledger.jsonl"))))
-            finder.assert_called_once()
             admin.assert_called_once()
             self.assertIn("Could not move", notify.call_args.args[1])
+
+    def test_app_trash_never_automates_finder(self):
+        source = Path(maintenance_core.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('tell application "Finder"', source)
+        self.assertNotIn("trash_with_finder", source)
 
 
 if __name__ == "__main__":
