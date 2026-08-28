@@ -124,6 +124,30 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
         self.assertIn("Deterministic triage: review", prompt)
         self.assertIn("recurred within the review window", prompt)
 
+    def test_google_drive_sync_is_quiet_until_cpu_is_extreme(self):
+        drive = proc(
+            command="/Applications/Google Drive.app/Contents/MacOS/Google Drive --single_process",
+            comm="/Applications/Google",
+        )
+        guidance = known_process_guidance(drive)
+        self.assertEqual(guidance["recurrence_group"], "google-drive-sync")
+        self.assertEqual(process_action_policy(drive), "graceful-quit")
+
+        config = {
+            "process_high_cpu_threshold": 50,
+            "process_high_io_total_mib_per_second": 20,
+            "process_high_io_write_mib_per_second": 10,
+            "process_routine_review_multiplier": 4,
+        }
+        drive["cpu_samples"] = [60, 55, 50]
+        drive["io_samples"] = [{"total_mib_s": 30, "write_mib_s": 5}]
+        self.assertEqual(triage_process(drive, guidance, config)["decision"], "suppress")
+
+        drive["cpu_samples"] = [100, 100, 100]
+        triage = triage_process(drive, guidance, config)
+        self.assertEqual(triage["decision"], "review")
+        self.assertIn("CPU 100.0% >= 100.0%", triage["reason"])
+
     def test_known_background_first_io_incident_is_silent_but_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             notifications = []

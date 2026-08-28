@@ -155,7 +155,7 @@ def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float
     return int(match.group(1)) / 1_000_000_000 if match else None
 
 
-def _known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
+def _known_process_guidance(proc: dict[str, Any]) -> dict[str, Any] | None:
     from process_review import known_process_guidance
 
     return known_process_guidance(proc)
@@ -330,7 +330,10 @@ class ResourceMonitor:
         self.state["pending_prompts"] = [
             value for value in self.state["pending_prompts"] if value in valid_ids
         ][-incident_limit:]
-        cooldown = float(self.config.get("resource_monitor_notification_cooldown_seconds", 6 * 3600))
+        cooldown = max(
+            float(self.config.get("resource_monitor_notification_cooldown_seconds", 6 * 3600)),
+            float(self.config.get("resource_monitor_known_notification_cooldown_seconds", 24 * 3600)),
+        )
         notifications = sorted(
             ((key, float(value)) for key, value in self.state["notifications"].items()),
             key=lambda item: item[1],
@@ -440,8 +443,15 @@ class ResourceMonitor:
             )
             return incident
 
-        cooldown = float(self.config.get("resource_monitor_notification_cooldown_seconds", 6 * 3600))
-        last_value = self.state["notifications"].get(instance)
+        cooldown_key = (
+            "resource_monitor_known_notification_cooldown_seconds"
+            if guidance
+            else "resource_monitor_notification_cooldown_seconds"
+        )
+        cooldown_default = 24 * 3600 if guidance else 6 * 3600
+        cooldown = float(self.config.get(cooldown_key, cooldown_default))
+        notification_key = f"group:{recurrence_group}" if recurrence_group else instance
+        last_value = self.state["notifications"].get(notification_key)
         last_notified = float(last_value) if last_value is not None else None
         if last_notified is None or now - last_notified >= cooldown:
             if guidance:
@@ -458,7 +468,7 @@ class ResourceMonitor:
                     f"{ATTRIBUTION_NOTE}"
                 )
             self.notify_fn(title, message)
-            self.state["notifications"][instance] = now
+            self.state["notifications"][notification_key] = now
             incident["notified_at"] = now
         if recurrence:
             self._deliver_prompt(incident, now)

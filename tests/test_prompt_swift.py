@@ -40,6 +40,15 @@ class PromptSwiftTests(unittest.TestCase):
         self.assertNotIn("waitingForNext", text)
         self.assertIn("Escape or Command-W remains available.", text)
 
+    def test_process_metrics_use_yellow_orange_red_severity_gradient(self):
+        text = (ROOT / "prompt.swift").read_text(encoding="utf-8")
+        self.assertIn("func severityMetrics", text)
+        self.assertIn("NSColor.systemYellow.blended", text)
+        self.assertIn("NSColor.systemOrange.blended", text)
+        self.assertIn("return .systemRed", text)
+        self.assertIn('#"(\\d+(?:\\.\\d+)?)%"#', text)
+        self.assertIn('#"(\\d+(?:\\.\\d+)?)\\s+MiB/s"#', text)
+
 
 if __name__ == "__main__":
     unittest.main()

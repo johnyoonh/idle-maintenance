@@ -38,6 +38,21 @@ The behavior can be tuned without adding process-specific automation:
 
 - `process_routine_suppression_enabled` defaults to `true`;
 - `process_routine_review_multiplier` defaults to `4.0` and is clamped to at least `1.0`.
+- `resource_monitor_notification_cooldown_seconds` defaults to 6 hours for unknown processes;
+- `resource_monitor_known_notification_cooldown_seconds` defaults to 24 hours and is keyed by the known recurrence group, so a routine service restart does not reset the cooldown.
+
+Google Drive synchronization is treated as known routine work. Expected downloads, uploads, offline pinning, hashing, and metadata reconciliation remain silent below the routine ceiling. CPU sustained at roughly one full core, or a recurrence after recovery, still opens review and offers a user-initiated graceful quit rather than process termination.
+
+To reduce normal-operation notifications further while retaining incident history, increase only the known-process cooldown:
+
+```json
+{
+  "process_routine_suppression_enabled": true,
+  "resource_monitor_known_notification_cooldown_seconds": 172800
+}
+```
+
+This example limits known-process notifications to once every 48 hours. Suppressed incidents continue to appear in status and history.
 
 Suppression means “record the understood isolated case without interrupting the user.” It does not authorize termination, throttling, or any other corrective action.
 

@@ -106,6 +106,7 @@ class TerminalInvestigationTests(unittest.TestCase):
         payload = helper.call_args.args[1]
         self.assertEqual(payload["mode"], "process")
         self.assertIn("Investigate this high-impact macOS process", payload["copyText"])
+        self.assertIn("CPU samples: 1.0%", payload["headline"])
 
 
 if __name__ == "__main__":

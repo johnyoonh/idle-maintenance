@@ -190,6 +190,56 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func severityColor(
+        value: Double,
+        moderate: Double,
+        elevated: Double,
+        critical: Double
+    ) -> NSColor? {
+        guard value >= moderate else { return nil }
+        if value >= critical { return .systemRed }
+        if value >= elevated {
+            let fraction = (value - elevated) / max(critical - elevated, 0.001)
+            return NSColor.systemOrange.blended(withFraction: fraction, of: .systemRed)
+        }
+        let fraction = (value - moderate) / max(elevated - moderate, 0.001)
+        return NSColor.systemYellow.blended(withFraction: fraction, of: .systemOrange)
+    }
+
+    func severityMetrics(_ text: String, font: NSFont, baseColor: NSColor) -> NSAttributedString {
+        let result = NSMutableAttributedString(
+            string: text,
+            attributes: [.font: font, .foregroundColor: baseColor]
+        )
+        let metrics: [(String, Double, Double, Double)] = [
+            (#"(\d+(?:\.\d+)?)%"#, 20, 50, 90),
+            (#"(\d+(?:\.\d+)?)\s+MiB/s"#, 20, 50, 100),
+        ]
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        for (pattern, moderate, elevated, critical) in metrics {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in expression.matches(in: text, range: range) {
+                guard match.numberOfRanges > 1,
+                      let valueRange = Range(match.range(at: 1), in: text),
+                      let value = Double(text[valueRange]),
+                      let color = severityColor(
+                          value: value,
+                          moderate: moderate,
+                          elevated: elevated,
+                          critical: critical
+                      ) else { continue }
+                result.addAttributes(
+                    [.foregroundColor: color, .font: NSFont.monospacedDigitSystemFont(
+                        ofSize: font.pointSize,
+                        weight: .bold
+                    )],
+                    range: match.range(at: 1)
+                )
+            }
+        }
+        return result
+    }
+
     func setupWindow() {
         let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = content
@@ -230,7 +280,12 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var detailTop: CGFloat = 255
         if mode == "process", !headlineText.isEmpty {
             let headline = NSTextField(wrappingLabelWithString: headlineText)
-            headline.font = .boldSystemFont(ofSize: 16)
+            let headlineFont = NSFont.boldSystemFont(ofSize: 16)
+            headline.attributedStringValue = severityMetrics(
+                headlineText,
+                font: headlineFont,
+                baseColor: .labelColor
+            )
             headline.alignment = .center
             headline.frame = NSRect(x: 24, y: 229, width: 592, height: 26)
             content.addSubview(headline)
@@ -238,8 +293,13 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let detail = NSTextField(wrappingLabelWithString: detailText)
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
+        let detailFont = NSFont.systemFont(ofSize: 11)
+        detail.attributedStringValue = mode == "process"
+            ? severityMetrics(detailText, font: detailFont, baseColor: .secondaryLabelColor)
+            : NSAttributedString(
+                string: detailText,
+                attributes: [.font: detailFont, .foregroundColor: NSColor.secondaryLabelColor]
+            )
         detail.alignment = .center
         detail.isSelectable = true
         detail.frame = NSRect(x: 24, y: 121, width: 592, height: max(54, detailTop - 121))

@@ -23,6 +23,17 @@ ATTRIBUTION_NOTE = (
 
 KNOWN_PROCESS_PROFILES = (
     {
+        "names": set(),
+        "prefixes": (),
+        "command_contains": ("Google Drive.app/Contents/MacOS/Google Drive",),
+        "recurrence_group": "google-drive-sync",
+        "role": "Google Drive synchronization and offline-file reconciliation",
+        "default_action": "Allow expected downloads, uploads, offline pinning, hashing, and metadata reconciliation to settle. If CPU remains near one full core after Drive reports it is current, use a user-initiated graceful quit and reopen.",
+        "action_policy": "graceful-quit",
+        "cpu_review_multiplier": 2.0,
+        "io_review_multiplier": 4.0,
+    },
+    {
         "names": {"mds", "mds_stores", "corespotlightd"},
         "prefixes": ("mdworker", "corespotlight"),
         "recurrence_group": "spotlight-indexing",
@@ -99,17 +110,25 @@ def _display(proc: dict[str, Any]) -> str:
     return f"{name} ({command})" if command and command.lower() != name else name
 
 
-def known_process_guidance(proc: dict[str, Any]) -> dict[str, str] | None:
+def known_process_guidance(proc: dict[str, Any]) -> dict[str, Any] | None:
     """Return deterministic handling guidance for common macOS background processes."""
     name = _base_name(proc)
+    command = str(proc.get("command") or "")
     for profile in KNOWN_PROCESS_PROFILES:
-        if name in profile["names"] or name.startswith(profile["prefixes"]):
+        command_matches = any(
+            marker.lower() in command.lower()
+            for marker in profile.get("command_contains", ())
+        )
+        if name in profile["names"] or name.startswith(profile["prefixes"]) or command_matches:
             return {
                 "name": name,
                 "recurrence_group": str(profile.get("recurrence_group") or f"process:{name}"),
                 "role": str(profile["role"]),
                 "default_action": str(profile["default_action"]),
                 "policy": "observe-first",
+                "action_policy": str(profile.get("action_policy") or "protected"),
+                "cpu_review_multiplier": float(profile.get("cpu_review_multiplier", 0) or 0),
+                "io_review_multiplier": float(profile.get("io_review_multiplier", 0) or 0),
             }
     return None
 
@@ -122,7 +141,10 @@ def should_suppress_process_alert(proc: dict[str, Any], config: dict[str, Any] |
 def process_action_policy(proc: dict[str, Any]) -> str:
     """Return protected, graceful-quit, or review-only for a process instance."""
     name = _base_name(proc)
-    if known_process_guidance(proc) or name in PROTECTED_APPLE_DAEMONS or name.startswith(PROTECTED_PREFIXES):
+    guidance = known_process_guidance(proc)
+    if guidance and guidance.get("action_policy") == "graceful-quit":
+        return "graceful-quit"
+    if guidance or name in PROTECTED_APPLE_DAEMONS or name.startswith(PROTECTED_PREFIXES):
         return "protected"
     command = str(proc.get("command") or "")
     if name == "mail" and ".app/Contents/MacOS/Mail" in command:
@@ -172,7 +194,7 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
         "policy": policy,
         "copyText": investigation_prompt(core, proc),
         "pending": 1,
-        "headline": "",
+        "headline": process_headline(proc),
     }
     try:
         value = legacy_prompt(core.BASE_DIR, payload)
@@ -182,6 +204,32 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
     if policy == "graceful-quit":
         allowed.add("GRACEFUL_QUIT")
     return value if value in allowed else "QUIT"
+
+
+def process_headline(proc: dict[str, Any]) -> str:
+    """Return compact metrics for severity coloring in one-shot reviews."""
+    samples = proc.get("cpu_samples")
+    if not isinstance(samples, list) or not samples:
+        samples = [proc.get("cpu", 0)]
+    cpu_values = []
+    for value in samples:
+        try:
+            cpu_values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    rates = proc.get("io_samples")
+    io_values = []
+    if isinstance(rates, list):
+        for rate in rates:
+            if not isinstance(rate, dict):
+                continue
+            try:
+                io_values.append(float(rate.get("total_mib_s", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+    if io_values and max(io_values) > 0:
+        return f"I/O peak {max(io_values):.1f} MiB/s • CPU {cpu_values[-1] if cpu_values else 0:.1f}%"
+    return "CPU samples: " + ", ".join(f"{value:.1f}%" for value in (cpu_values or [0.0]))
 
 
 def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any] | None = None) -> str:

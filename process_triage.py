@@ -37,7 +37,7 @@ def _peak_io(proc: dict[str, Any], key: str, fallback_key: str) -> float:
 
 def triage_process(
     proc: dict[str, Any],
-    guidance: dict[str, str] | None,
+    guidance: dict[str, Any] | None,
     config: dict[str, Any] | None = None,
     *,
     peak_total_mib_s: float | None = None,
@@ -72,9 +72,11 @@ def triage_process(
         multiplier = max(1.0, float(cfg.get("process_routine_review_multiplier", 4.0)))
     except (TypeError, ValueError):
         multiplier = 4.0
-    cpu_limit = max(0.0, float(cfg.get("process_high_cpu_threshold", 50.0))) * multiplier
-    total_limit = max(0.0, float(cfg.get("process_high_io_total_mib_per_second", 20.0))) * multiplier
-    write_limit = max(0.0, float(cfg.get("process_high_io_write_mib_per_second", 10.0))) * multiplier
+    cpu_multiplier = max(1.0, float(guidance.get("cpu_review_multiplier", 0) or multiplier))
+    io_multiplier = max(1.0, float(guidance.get("io_review_multiplier", 0) or multiplier))
+    cpu_limit = max(0.0, float(cfg.get("process_high_cpu_threshold", 50.0))) * cpu_multiplier
+    total_limit = max(0.0, float(cfg.get("process_high_io_total_mib_per_second", 20.0))) * io_multiplier
+    write_limit = max(0.0, float(cfg.get("process_high_io_write_mib_per_second", 10.0))) * io_multiplier
 
     peak_cpu = _peak_cpu(proc)
     measured_total = _peak_io(proc, "total_mib_s", "average_total_mib_s")
@@ -101,6 +103,6 @@ def triage_process(
     return {
         "decision": "suppress",
         "classification": "routine-known",
-        "reason": "Known routine macOS work is below the recurrence/extreme-use review ceiling.",
+        "reason": "Known routine process work is below the recurrence/extreme-use review ceiling.",
         "guidance": guidance,
     }
