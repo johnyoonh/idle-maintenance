@@ -5,7 +5,9 @@ import json
 import time
 import sys
 import shlex
+import shutil
 import tempfile
+from pathlib import Path
 from idle_config import (
     APP_SUPPORT_DIR,
     DEFAULT_CONFIG,
@@ -34,7 +36,55 @@ def log(msg):
     with open(LOG_PATH, "a") as f:
         f.write(f"[{timestamp}] {msg}\n")
 
-def notify_user(title, message):
+def _terminal_notifier_path():
+    discovered = shutil.which("terminal-notifier")
+    if discovered:
+        return discovered
+    for candidate in (
+        "/opt/homebrew/bin/terminal-notifier",
+        "/usr/local/bin/terminal-notifier",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def notify_user(title, message, *, click_path=None):
+    if click_path is not None:
+        notifier = _terminal_notifier_path()
+        if notifier:
+            resolved_path = str(Path(click_path).expanduser().resolve())
+            editor_command = (
+                "/usr/bin/open -a "
+                + shlex.quote("Visual Studio Code")
+                + " -- "
+                + shlex.quote(resolved_path)
+                + " || /usr/bin/open -t -- "
+                + shlex.quote(resolved_path)
+            )
+            try:
+                result = subprocess.run(
+                    [
+                        notifier,
+                        "-title",
+                        title,
+                        "-message",
+                        message,
+                        "-execute",
+                        editor_command,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    return
+                detail = (result.stderr or result.stdout or "").strip()
+                log(f"Actionable notification failed: {detail or f'exit {result.returncode}'}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                log(f"Actionable notification failed: {error}")
+
     script = '''
 on run argv
     display notification (item 2 of argv) with title (item 1 of argv)

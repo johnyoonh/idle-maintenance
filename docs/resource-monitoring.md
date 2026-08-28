@@ -58,6 +58,7 @@ Suppression means “record the understood isolated case without interrupting th
 
 ## Notifications and review timing
 
+- On systems with `terminal-notifier`, clicking **Show** opens `resource-monitor-history.jsonl` in VS Code when available, then falls back to the default macOS text editor. The AppleScript fallback remains available when that helper is not installed, but cannot attach a click destination.
 - Each process identity receives at most one notification every six hours when review is warranted.
 - A first non-suppressed incident is queued for review until the user returns after at least 15 minutes idle.
 - A recurrent incident for the same logical process within 30 minutes of recovery opens the review prompt immediately. Known recurrence groups survive PID restarts.

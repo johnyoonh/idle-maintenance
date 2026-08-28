@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import maintenance_status
 import process_identity as identity
@@ -80,6 +80,23 @@ class ResourceMonitorTests(unittest.TestCase):
             seconds=10,
             idle_seconds=idle,
             now=self.clock,
+        )
+
+    def test_default_notification_attaches_incident_history(self):
+        monitor = ResourceMonitor(
+            self.config,
+            state_path=self.state,
+            history_path=self.history,
+            now_fn=lambda: self.clock,
+        )
+
+        with patch("maintenance_core.notify_user") as notify:
+            monitor._notify_default("Idle Maintenance resource incident", "synthetic incident")
+
+        notify.assert_called_once_with(
+            "Idle Maintenance resource incident",
+            "synthetic incident",
+            click_path=self.history,
         )
 
     def open_incident(self):

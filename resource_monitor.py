@@ -212,7 +212,7 @@ class ResourceMonitor:
     def _notify_default(self, title: str, message: str) -> None:
         from maintenance_core import notify_user
 
-        notify_user(title, message)
+        notify_user(title, message, click_path=self.history_path)
 
     def _prompt_default(self, proc: dict[str, Any], incident: dict[str, Any]) -> str:
         import maintenance_interactive as core

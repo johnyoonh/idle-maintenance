@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,45 @@ from process_review import handle_process_action, prompt_process
 
 
 class TerminalInvestigationTests(unittest.TestCase):
+    def test_actionable_notification_opens_log_with_default_file_handler(self):
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        history = Path("/tmp/synthetic resource history.jsonl")
+
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value="/test/terminal-notifier"),
+            patch("maintenance_core.subprocess.run", return_value=completed) as run,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path=history,
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "/test/terminal-notifier")
+        self.assertEqual(command[1:5], ["-title", "Idle Maintenance resource incident", "-message", "sample sustained 25 MiB/s"])
+        self.assertEqual(command[5], "-execute")
+        resolved = str(history.resolve())
+        self.assertEqual(
+            command[6],
+            f"/usr/bin/open -a 'Visual Studio Code' -- {shlex.quote(resolved)}"
+            f" || /usr/bin/open -t -- {shlex.quote(resolved)}",
+        )
+        self.assertNotIn("osascript", command)
+
+    def test_actionable_notification_falls_back_to_applescript(self):
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value=None),
+            patch("maintenance_core.subprocess.run") as run,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path="/tmp/resource-monitor-history.jsonl",
+            )
+
+        self.assertEqual(run.call_args.args[0][0], "osascript")
+
     def test_launch_file_is_private_self_deleting_and_shell_quoted(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(
