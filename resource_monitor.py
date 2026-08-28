@@ -216,10 +216,20 @@ class ResourceMonitor:
 
     def _prompt_default(self, proc: dict[str, Any], incident: dict[str, Any]) -> str:
         import maintenance_interactive as core
-        from activity_intelligence import DB_PATH as INTELLIGENCE_DB_PATH, status as intelligence_status
+        from activity_intelligence import (
+            DB_PATH as INTELLIGENCE_DB_PATH,
+            investigation_suggestion,
+            status as intelligence_status,
+        )
         from process_review import handle_process_action, prompt_process
 
         review_proc = dict(proc)
+        review_proc["incident_id"] = str(incident.get("id") or "")
+        known_process = incident.get("known_process")
+        if isinstance(known_process, dict):
+            review_proc["recurrence_group"] = str(
+                known_process.get("recurrence_group") or ""
+            )
         review_proc["resource_triage"] = incident.get("triage")
         triage_reason = (incident.get("triage") or {}).get("reason")
         review_proc["reason"] = (
@@ -227,6 +237,19 @@ class ResourceMonitor:
             f"peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s total, "
             f"{float(incident.get('peak_write_mib_s', 0)):.1f} MiB/s writes; {ATTRIBUTION_NOTE}"
         )
+        prior = investigation_suggestion(
+            process_key=str(incident.get("process_key") or ""),
+            recurrence_group=str(
+                known_process.get("recurrence_group") or ""
+            ) if isinstance(known_process, dict) else "",
+            db_path=Path(
+                os.path.expanduser(
+                    str(self.config.get("activity_intelligence_db_path", INTELLIGENCE_DB_PATH))
+                )
+            ),
+        )
+        if prior:
+            review_proc["reason"] += " " + prior
         try:
             intelligence = intelligence_status(
                 Path(os.path.expanduser(str(self.config.get("activity_intelligence_db_path", INTELLIGENCE_DB_PATH))))

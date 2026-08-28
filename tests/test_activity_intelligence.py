@@ -1,8 +1,10 @@
 import json
 import io
+import os
 import sqlite3
 import tempfile
 import unittest
+import datetime as dt
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,14 +12,20 @@ from types import SimpleNamespace
 from activity_intelligence import (
     ActivityWatchContext,
     DiagnosisResult,
+    INVESTIGATION_SUMMARY_PREFIX,
     OpenAIAPI,
     VectorEventStore,
     app_usage_context,
+    capture_investigation_summary,
     cosine_similarity,
     embed_text,
+    find_investigation_summary,
     incident_event,
+    investigation_summary_instruction,
+    investigation_suggestion,
     install_codex_event_hook,
     main,
+    parse_investigation_summary,
     record_external_event,
     run_cycle,
     status,
@@ -98,6 +106,89 @@ class ActivityIntelligenceTests(unittest.TestCase):
         self.assertIn("process", output.getvalue())
         self.assertIn("status", output.getvalue())
         self.assertIn("record", output.getvalue())
+        self.assertIn("capture", output.getvalue())
+
+    def _write_rollout(self, token, assistant_text):
+        day = dt.datetime.fromtimestamp(self.clock, tz=dt.timezone.utc)
+        directory = self.root / "sessions" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+        directory.mkdir(parents=True)
+        rollout = directory / "rollout-synthetic.jsonl"
+        records = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"investigate\nInvestigation reference: {token}"}],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": assistant_text}],
+                },
+            },
+        ]
+        rollout.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+        os.utime(rollout, (self.clock, self.clock))
+        return self.root / "sessions"
+
+    def test_capture_stores_only_sanitized_structured_investigation_summary(self):
+        token = "synthetic-token"
+        private_path = str(Path.home() / "synthetic-private" / "sample-folder")
+        footer = INVESTIGATION_SUMMARY_PREFIX + " " + json.dumps(
+            {
+                "classification": "normal",
+                "summary": f"Expected sync at {private_path}",
+                "remedy": "No action; token=private-value",
+                "confidence": 0.91,
+            }
+        )
+        sessions = self._write_rollout(token, "Raw private investigation details.\n" + footer)
+
+        event = capture_investigation_summary(
+            token=token,
+            started_at=self.clock,
+            incident_id="incident-3",
+            process_key="process:fileproviderd",
+            recurrence_group="cloud-sync",
+            sessions_root=sessions,
+            db_path=self.db,
+            now_fn=lambda: self.clock + 30,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event["kind"], "investigation-summary")
+        self.assertNotIn("Raw private", json.dumps(event))
+        self.assertNotIn(private_path, json.dumps(event))
+        self.assertNotIn("private-value", json.dumps(event))
+        with VectorEventStore(self.db) as store:
+            stored = store.connection.execute(
+                "SELECT kind, payload_json FROM events WHERE event_id=?", (event["event_id"],)
+            ).fetchone()
+        self.assertEqual(stored["kind"], "investigation-summary")
+        self.assertEqual(json.loads(stored["payload_json"])["classification"], "normal")
+        latest = status(self.db)["latest_investigation"]
+        self.assertEqual(latest["incident_id"], "incident-3")
+        self.assertEqual(latest["classification"], "normal")
+
+    def test_capture_requires_explicit_footer_and_matching_token(self):
+        sessions = self._write_rollout("right-token", "Investigation was normal, but no footer was emitted.")
+        self.assertIsNone(find_investigation_summary("wrong-token", self.clock, sessions_root=sessions))
+        self.assertIsNone(find_investigation_summary("right-token", self.clock, sessions_root=sessions))
+
+    def test_footer_contract_is_bounded_and_machine_readable(self):
+        instruction = investigation_summary_instruction("safe-token")
+        self.assertIn("safe-token", instruction)
+        self.assertIn("IDLE_MAINTENANCE_SUMMARY_JSON:", instruction)
+        parsed = parse_investigation_summary(
+            'IDLE_MAINTENANCE_SUMMARY_JSON: {"classification":"actionable",'
+            '"summary":"Restart the app","remedy":"Graceful restart","confidence":2}'
+        )
+        self.assertEqual(parsed["classification"], "actionable")
+        self.assertEqual(parsed["confidence"], 1.0)
 
     def test_app_usage_context_removes_paths(self):
         self.usage.write_text(json.dumps({
@@ -159,6 +250,166 @@ class ActivityIntelligenceTests(unittest.TestCase):
         self.assertTrue(self.report.exists())
         latest = status(self.db)["latest"]
         self.assertEqual(len(latest["event_ids"]), 3)
+
+    def test_two_high_confidence_normal_investigations_suppress_false_positive_pattern(self):
+        for index in range(2):
+            record_external_event(
+                source="codex",
+                kind="investigation-summary",
+                summary=f"investigation outcome normal | group cloud-sync | expected sync {index}",
+                payload={
+                    "classification": "normal",
+                    "confidence": 0.9,
+                    "incident_id": f"investigated-{index}",
+                    "recurrence_group": "cloud-sync",
+                    "summary": "Expected synchronization settled normally.",
+                    "remedy": "No action.",
+                },
+                timestamp=self.clock - 300 + index,
+                db_path=self.db,
+            )
+        diagnoser = FakeDiagnoser()
+        self.write_state([self.incident(1), self.incident(2), self.incident(3)])
+
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=diagnoser,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["diagnoses"], 0)
+        self.assertGreaterEqual(result["false_positive_suppressions"], 1)
+        self.assertEqual(diagnoser.prompts, [])
+        self.assertEqual(status(self.db)["investigation_summaries"], 2)
+
+    def test_actionable_investigation_is_included_in_future_suggestion_context(self):
+        record_external_event(
+            source="codex",
+            kind="investigation-summary",
+            summary="investigation outcome actionable | group cloud-sync | stalled backlog",
+            payload={
+                "classification": "actionable",
+                "confidence": 0.95,
+                "recurrence_group": "cloud-sync",
+                "summary": "The synchronization backlog was stalled.",
+                "remedy": "Gracefully restart the provider application.",
+            },
+            timestamp=self.clock - 120,
+            db_path=self.db,
+        )
+        diagnoser = FakeDiagnoser()
+        self.write_state([self.incident(1), self.incident(2), self.incident(3)])
+
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=diagnoser,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["diagnoses"], 1)
+        self.assertIn("investigation-summary", diagnoser.prompts[0])
+        self.assertIn("stalled backlog", diagnoser.prompts[0])
+        suggestion = investigation_suggestion(
+            recurrence_group="cloud-sync",
+            db_path=self.db,
+            now=self.clock,
+        )
+        self.assertIn("actionable", suggestion)
+        self.assertIn("Gracefully restart", suggestion)
+
+    def test_duplicate_summaries_from_one_incident_cannot_suppress_pattern(self):
+        for index in range(2):
+            record_external_event(
+                source="codex",
+                kind="investigation-summary",
+                summary=f"investigation outcome normal | group cloud-sync | duplicate {index}",
+                payload={
+                    "classification": "normal",
+                    "confidence": 0.99,
+                    "incident_id": "same-incident",
+                    "recurrence_group": "cloud-sync",
+                },
+                timestamp=self.clock - index,
+                db_path=self.db,
+            )
+        diagnoser = FakeDiagnoser()
+        self.write_state([self.incident(1), self.incident(2), self.incident(3)])
+
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=diagnoser,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["false_positive_suppressions"], 0)
+        self.assertEqual(result["diagnoses"], 1)
+
+    def test_transient_diagnosis_failure_keeps_spike_pending_for_retry(self):
+        class FailingDiagnoser:
+            calls = 0
+
+            def diagnose(self, _prompt):
+                self.calls += 1
+                return DiagnosisResult(False, error="temporarily unavailable")
+
+        self.write_state([self.incident(1), self.incident(2), self.incident(3)])
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=FailingDiagnoser(),
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["diagnoses"], 0)
+        self.assertEqual(result["errors"], ["temporarily unavailable"])
+        self.assertGreater(result["pending_spikes"], 0)
+
+        deferred = FakeDiagnoser()
+        deferred_result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=deferred,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock + 60,
+        )
+        self.assertEqual(deferred.prompts, [])
+        self.assertGreater(deferred_result["pending_spikes"], 0)
+
+        retry = FakeDiagnoser()
+        retry_result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=retry,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock + 1801,
+        )
+        self.assertEqual(len(retry.prompts), 1)
+        self.assertEqual(retry_result["diagnoses"], 1)
 
     def test_recent_similar_diagnosis_prevents_repeat(self):
         first_diagnoser = FakeDiagnoser()

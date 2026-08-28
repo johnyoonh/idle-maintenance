@@ -270,12 +270,13 @@ def render_text(status: dict[str, Any]) -> str:
             f"{incident.get('status', 'unknown')}, peak {float(incident.get('peak_total_mib_s', 0)):.1f} MiB/s"
         )
     latest_diagnosis = intelligence.get("latest") if isinstance(intelligence, dict) else None
+    latest_investigation = intelligence.get("latest_investigation") if isinstance(intelligence, dict) else None
     health = intelligence.get("health") if isinstance(intelligence, dict) else {}
     lines.extend(
         [
             "",
             "Pattern intelligence:",
-            f"- Vector backend: {health.get('vector_backend') or 'not-started'}; stored events: {intelligence.get('events', 0)}; pending spikes: {intelligence.get('pending_spikes', 0)}",
+            f"- Vector backend: {health.get('vector_backend') or 'not-started'}; stored events: {intelligence.get('events', 0)}; investigation summaries: {intelligence.get('investigation_summaries', 0)}; pending spikes: {intelligence.get('pending_spikes', 0)}",
             f"- Worker error: {health.get('last_error') or health.get('embedding_error') or 'none'}",
         ]
     )
@@ -285,6 +286,12 @@ def render_text(status: dict[str, Any]) -> str:
         lines.append(
             f"- Latest remedy{f' ({float(confidence):.0%} confidence)' if confidence is not None else ''}: "
             f"{' '.join(str(latest_diagnosis.get('response') or '').split())[:300]}"
+        )
+    if isinstance(latest_investigation, dict):
+        lines.append(
+            f"- Latest investigation ({latest_investigation.get('classification', 'uncertain')}, "
+            f"{float(latest_investigation.get('confidence') or 0):.0%} confidence): "
+            f"{' '.join(str(latest_investigation.get('summary') or '').split())[:300]}"
         )
     runner_output = runner.get("status_output", "").strip()
     if runner_output:
@@ -333,6 +340,8 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             "events": 0,
             "stored_diagnoses": 0,
             "pending_spikes": 0,
+            "investigation_summaries": 0,
+            "latest_investigation": None,
             "latest": None,
             "health": {"last_error": str(error)[:500], "vector_backend": "unavailable"},
         }

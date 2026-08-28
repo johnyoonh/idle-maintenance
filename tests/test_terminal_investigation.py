@@ -70,6 +70,32 @@ class TerminalInvestigationTests(unittest.TestCase):
         self.assertIn("codex", content)
         self.assertIn(str(Path(directory)), content)
 
+    def test_investigation_capture_runs_only_after_codex_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(
+                maintenance_core.create_codex_launch_file(
+                    "synthetic investigation",
+                    directory,
+                    directory,
+                    investigation_context={
+                        "incident_id": "incident-42",
+                        "process_key": "process:sample",
+                        "recurrence_group": "sample-work",
+                    },
+                    capture_script=str(Path(maintenance_core.BASE_DIR) / "activity_intelligence.py"),
+                    investigation_token="fixed-token",
+                    started_at=1234,
+                )
+            )
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn("Investigation reference: fixed-token", content)
+        self.assertIn("IDLE_MAINTENANCE_SUMMARY_JSON:", content)
+        self.assertIn("; codex_status=$?;", content)
+        self.assertIn("activity_intelligence.py capture", content)
+        self.assertIn("--incident-id incident-42", content)
+        self.assertNotIn("tee ", content)
+
     def test_iterm_launch_uses_launchservices_not_apple_events(self):
         commands = []
 
@@ -126,6 +152,8 @@ class TerminalInvestigationTests(unittest.TestCase):
 
         self.assertEqual(outcome, "failed")
         self.assertIn("copied to the clipboard", notifications[0][1])
+        context = core.open_codex_in_terminal.call_args.kwargs["investigation_context"]
+        self.assertEqual(context["process_key"], "")
 
     def test_one_shot_monitor_prompt_includes_copy_text_and_uses_shared_helper(self):
         process = {

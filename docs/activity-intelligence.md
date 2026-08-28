@@ -10,7 +10,7 @@ The pattern worker reads three local sources:
 - the ActivityWatch HTTP API for performance samples, AFK state, and foreground application names;
 - Codex `session_meta` records for session timing and the workspace basename.
 
-Window titles, URLs, ActivityWatch text fields, Codex prompts, responses, transcripts, and absolute workspace paths are discarded and never persisted, embedded, or sent to the diagnosis model. ActivityWatch databases are never opened or modified directly.
+Window titles, URLs, ActivityWatch text fields, Codex prompts, raw responses, transcripts, and absolute workspace paths are discarded and never persisted, embedded, or sent to the diagnosis model. An investigation launched by Idle Maintenance carries a random reference and asks Codex for one bounded `IDLE_MAINTENANCE_SUMMARY_JSON` footer. After Codex exits, a post-exit helper locates that exact reference in recent rollout files and stores only the validated, sanitized classification, finding, remedy, and confidence. Unstructured output is ignored. ActivityWatch databases are never opened or modified directly.
 
 ## Local vector database
 
@@ -34,7 +34,11 @@ The default gate opens when either condition is true:
 
 Similarity defaults to `0.82`. A cluster is diagnosed at most once per 24 hours, and all clusters share a four-diagnosis daily budget.
 
+Completed investigations feed the next pattern decision. Two identity-linked `normal` outcomes with confidence of at least `0.75`, and no conflicting `actionable` outcome, suppress a matching false-positive pattern without calling the diagnosis model. Actionable or uncertain outcomes are added to the evidence supplied to the next diagnosis so the suggestion starts from observations already completed by the user. A single investigation can never suppress a pattern.
+
 Diagnosis uses the OpenAI Responses API with `store=false`, no tools, and a strict JSON Schema. The response includes a summary, causes, evidence, remedies, verification step, confidence, urgency, and uncertainty. Only a diagnosis with confidence at least `0.75` and a concrete reversible remedy creates a notification. No remedy is executed automatically.
+
+A transient diagnosis failure leaves its spike pending and pauses further model attempts for 30 minutes. The worker continues ingesting local observations during that interval and retries later instead of consuming the failed event or repeatedly calling the model.
 
 `OPENAI_API_KEY` must be available to the background process. `AW_PATTERN_MODEL` overrides the diagnosis model; `OPENAI_EVERYDAY_MODEL` is the secondary override; the default is `gpt-5-mini`.
 
@@ -53,7 +57,7 @@ Run one cycle manually:
 python3 activity_intelligence.py process
 ```
 
-`maint status` reports the vector backend, stored and pending observations, worker/API degradation, and latest remedy.
+`maint status` reports the vector backend, stored investigation summaries, stored and pending observations, worker/API degradation, and latest remedy.
 
 ## Retention and safety
 

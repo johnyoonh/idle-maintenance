@@ -7,6 +7,7 @@ import sys
 import shlex
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from idle_config import (
     APP_SUPPORT_DIR,
@@ -541,13 +542,68 @@ def process_cwd(proc, default="/"):
         log(f"Failed to resolve cwd for process {proc.get('pid', '?')}: {e}")
     return default
 
-def build_codex_investigation_command(prompt_text, cwd="/"):
+def build_codex_investigation_command(
+    prompt_text,
+    cwd="/",
+    *,
+    investigation_context=None,
+    capture_script=None,
+    investigation_token=None,
+    started_at=None,
+):
     launch_cwd = cwd if os.path.isabs(cwd) and os.path.isdir(cwd) else "/"
-    return "cd " + shlex.quote(launch_cwd) + " && codex " + shlex.quote(prompt_text)
+    context = investigation_context if isinstance(investigation_context, dict) else {}
+    if not context or not capture_script or not os.path.isfile(capture_script):
+        return "cd " + shlex.quote(launch_cwd) + " && exec codex " + shlex.quote(prompt_text)
 
-def create_codex_launch_file(prompt_text, cwd="/", directory=None):
+    from activity_intelligence import investigation_summary_instruction
+
+    token = str(investigation_token or uuid.uuid4().hex)
+    launched_at = time.time() if started_at is None else float(started_at)
+    augmented_prompt = prompt_text + investigation_summary_instruction(token)
+    capture = [
+        "/usr/bin/python3",
+        capture_script,
+        "capture",
+        "--token",
+        token,
+        "--started-at",
+        str(launched_at),
+    ]
+    for option, key in (
+        ("--incident-id", "incident_id"),
+        ("--process-key", "process_key"),
+        ("--recurrence-group", "recurrence_group"),
+    ):
+        value = str(context.get(key) or "")
+        if value:
+            capture.extend([option, value])
+    return (
+        "cd " + shlex.quote(launch_cwd)
+        + " && codex " + shlex.quote(augmented_prompt)
+        + "; codex_status=$?; " + shlex.join(capture)
+        + " >/dev/null 2>&1 || true; exit $codex_status"
+    )
+
+def create_codex_launch_file(
+    prompt_text,
+    cwd="/",
+    directory=None,
+    *,
+    investigation_context=None,
+    capture_script=None,
+    investigation_token=None,
+    started_at=None,
+):
     """Create a private, self-deleting command file for a terminal tab."""
-    codex_command = build_codex_investigation_command(prompt_text, cwd)
+    codex_command = build_codex_investigation_command(
+        prompt_text,
+        cwd,
+        investigation_context=investigation_context,
+        capture_script=capture_script,
+        investigation_token=investigation_token,
+        started_at=started_at,
+    )
     descriptor, path = tempfile.mkstemp(
         prefix="idle-maintenance-investigate-",
         suffix=".command",
@@ -579,11 +635,19 @@ def open_codex_in_terminal(
     launch_runner=subprocess.run,
     clipboard_fn=copy_text_to_clipboard,
     launch_directory=None,
+    investigation_context=None,
+    capture_script=None,
 ):
     """Open an investigation in a new terminal tab without Apple Events/TCC."""
     prompt_copied = clipboard_fn(prompt_text)
     try:
-        launch_file = create_codex_launch_file(prompt_text, cwd, launch_directory)
+        launch_file = create_codex_launch_file(
+            prompt_text,
+            cwd,
+            launch_directory,
+            investigation_context=investigation_context,
+            capture_script=capture_script or os.path.join(BASE_DIR, "activity_intelligence.py"),
+        )
     except OSError as error:
         log(f"Failed to create Codex investigation launch file: {error}")
         return False, None, prompt_copied
@@ -705,7 +769,15 @@ def run_process_audit(config, prompt_budget=None):
         if action == "INVESTIGATE":
             prompt_text = build_process_investigation_prompt(proc)
             cwd = process_cwd(proc)
-            opened, terminal_app, prompt_copied = open_codex_in_terminal(prompt_text, cwd)
+            opened, terminal_app, prompt_copied = open_codex_in_terminal(
+                prompt_text,
+                cwd,
+                investigation_context={
+                    "incident_id": str(proc.get("incident_id") or ""),
+                    "process_key": str(proc.get("process_key") or ""),
+                    "recurrence_group": str(proc.get("recurrence_group") or ""),
+                },
+            )
             if not opened:
                 if prompt_copied:
                     log(f"Copied Codex investigation prompt for {proc['comm']} to clipboard.")

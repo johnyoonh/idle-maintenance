@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
     "activity_intelligence_diagnosis_model": "gpt-5-mini",
     "activity_intelligence_notification_confidence": 0.75,
     "activity_intelligence_worsening_multiplier": 1.5,
+    "activity_intelligence_failure_retry_minutes": 30,
     "system_disk_sample_seconds": 1,
     "return_from_away_minutes": 15,
     "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",

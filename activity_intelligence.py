@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import struct
 import subprocess
@@ -51,7 +52,16 @@ DEFAULTS = {
     "activity_intelligence_diagnosis_model": "gpt-5-mini",
     "activity_intelligence_notification_confidence": 0.75,
     "activity_intelligence_worsening_multiplier": 1.5,
+    "activity_intelligence_failure_retry_minutes": 30,
 }
+
+INVESTIGATION_SUMMARY_PREFIX = "IDLE_MAINTENANCE_SUMMARY_JSON:"
+INVESTIGATION_CLASSIFICATIONS = {"normal", "actionable", "uncertain"}
+INVESTIGATION_SUMMARY_MAX_CHARS = 800
+INVESTIGATION_REMEDY_MAX_CHARS = 800
+INVESTIGATION_ROLLOUT_MAX_LINE_BYTES = 2 * 1024 * 1024
+INVESTIGATION_FEEDBACK_MIN_NORMAL = 2
+INVESTIGATION_FEEDBACK_MIN_CONFIDENCE = 0.75
 
 
 def now_epoch() -> float:
@@ -191,6 +201,236 @@ def codex_metadata_context(
         if project and project not in projects:
             projects.append(project)
     return projects[:3]
+
+
+def investigation_summary_instruction(token: str) -> str:
+    """Return a bounded machine-readable footer request for one investigation."""
+    safe_token = re.sub(r"[^A-Za-z0-9_-]", "", str(token))[:80]
+    return (
+        "\n\nInvestigation reference: " + safe_token + "\n"
+        "At the end of the final response, include exactly one single-line footer with this prefix:\n"
+        f'{INVESTIGATION_SUMMARY_PREFIX} '
+        '{"classification":"normal","summary":"concise finding",'
+        '"remedy":"concise next step","confidence":0.0}\n'
+        "Choose exactly one classification: normal, actionable, or uncertain. "
+        "Use normal only when the measured activity is expected or resolved without a remedy. "
+        "Do not place commands, paths, credentials, or private content in the footer."
+    )
+
+
+def _sanitize_investigation_text(value: Any, limit: int) -> str:
+    text = str(value or "").replace(str(Path.home()), "$HOME")
+    text = re.sub(r"/(?:Users|home)/[^/\s]+", "$HOME", text)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"(?i)\b(?:bearer|authorization)\s+[A-Za-z0-9._~+/=-]+", "[redacted]", text)
+    text = re.sub(r"(?i)\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+", "[redacted]", text)
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", text)
+    text = " ".join(text.replace("`", "").split())
+    return text[: max(0, int(limit))].rstrip()
+
+
+def parse_investigation_summary(text: str) -> dict[str, Any] | None:
+    """Parse and sanitize the explicit footer; never infer from raw output."""
+    parsed: dict[str, Any] | None = None
+    for line in str(text or "").splitlines():
+        if INVESTIGATION_SUMMARY_PREFIX not in line:
+            continue
+        raw = line.split(INVESTIGATION_SUMMARY_PREFIX, 1)[1].strip()
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        classification = str(value.get("classification") or "").strip().lower()
+        if classification not in INVESTIGATION_CLASSIFICATIONS:
+            continue
+        summary = _sanitize_investigation_text(value.get("summary"), INVESTIGATION_SUMMARY_MAX_CHARS)
+        remedy = _sanitize_investigation_text(value.get("remedy"), INVESTIGATION_REMEDY_MAX_CHARS)
+        if not summary:
+            continue
+        confidence = min(1.0, max(0.0, _float(value.get("confidence"), 0.0)))
+        parsed = {
+            "classification": classification,
+            "summary": summary,
+            "remedy": remedy,
+            "confidence": confidence,
+        }
+    return parsed
+
+
+def _message_text(payload: dict[str, Any], content_type: str) -> str:
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(item.get("text") or "")
+        for item in content
+        if isinstance(item, dict) and item.get("type") == content_type
+    )
+
+
+def _recent_rollout_paths(root: Path, started_at: float) -> list[Path]:
+    paths: list[Path] = []
+    start = dt.datetime.fromtimestamp(float(started_at), tz=dt.timezone.utc)
+    for offset in (-1, 0, 1):
+        day = start + dt.timedelta(days=offset)
+        directory = root / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+        if directory.is_dir():
+            paths.extend(directory.glob("*.jsonl"))
+    eligible = []
+    for path in paths:
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            continue
+        if modified >= float(started_at) - 300:
+            eligible.append((modified, path))
+    return [path for _, path in sorted(eligible, reverse=True)[:100]]
+
+
+def find_investigation_summary(
+    token: str,
+    started_at: float,
+    *,
+    sessions_root: Path | None = None,
+) -> dict[str, Any] | None:
+    """Find the latest validated footer after a token-matched user message."""
+    safe_token = re.sub(r"[^A-Za-z0-9_-]", "", str(token))[:80]
+    if not safe_token:
+        return None
+    root = sessions_root or Path.home() / ".codex" / "sessions"
+    if not root.is_dir():
+        return None
+    for path in _recent_rollout_paths(root, started_at):
+        matched = False
+        latest: dict[str, Any] | None = None
+        try:
+            with path.open(encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if len(line) > INVESTIGATION_ROLLOUT_MAX_LINE_BYTES:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = record.get("payload") if isinstance(record, dict) else None
+                    if not isinstance(payload, dict) or record.get("type") != "response_item":
+                        continue
+                    if payload.get("type") != "message":
+                        continue
+                    role = payload.get("role")
+                    if role == "user" and safe_token in _message_text(payload, "input_text"):
+                        matched = True
+                        continue
+                    if matched and role == "assistant":
+                        parsed = parse_investigation_summary(_message_text(payload, "output_text"))
+                        if parsed:
+                            latest = parsed
+        except OSError:
+            continue
+        if matched and latest:
+            return latest
+    return None
+
+
+def capture_investigation_summary(
+    *,
+    token: str,
+    started_at: float,
+    incident_id: str = "",
+    process_key: str = "",
+    recurrence_group: str = "",
+    sessions_root: Path | None = None,
+    db_path: Path = DB_PATH,
+    now_fn: Callable[[], float] = now_epoch,
+) -> dict[str, Any] | None:
+    """Persist only the bounded footer as a vector event linked to its incident."""
+    result = find_investigation_summary(token, started_at, sessions_root=sessions_root)
+    if not result:
+        return None
+    safe_incident = _sanitize_investigation_text(incident_id, 120)
+    safe_process = _sanitize_investigation_text(process_key, 160)
+    safe_group = _sanitize_investigation_text(recurrence_group, 120)
+    parts = [
+        f"investigation outcome {result['classification']}",
+        f"group {safe_group}" if safe_group else "",
+        f"process-key {safe_process}" if safe_process and not safe_group else "",
+        f"finding {result['summary']}",
+        f"remedy {result['remedy']}" if result["remedy"] else "",
+    ]
+    event = {
+        "event_id": "codex-summary:" + hashlib.sha256(str(token).encode()).hexdigest()[:24],
+        "timestamp": float(now_fn()),
+        "source": "codex",
+        "kind": "investigation-summary",
+        "summary": " | ".join(part for part in parts if part),
+        "payload": {
+            "incident_id": safe_incident,
+            "process_key": safe_process,
+            "recurrence_group": safe_group,
+            **result,
+        },
+    }
+    with VectorEventStore(db_path) as store:
+        store.add_event(event)
+    return event
+
+
+def investigation_suggestion(
+    *,
+    process_key: str = "",
+    recurrence_group: str = "",
+    db_path: Path = DB_PATH,
+    now: float | None = None,
+    lookback_days: float = 30,
+) -> str:
+    """Return the strongest recent identity-linked outcome for a future review."""
+    if not process_key and not recurrence_group:
+        return ""
+    current = now_epoch() if now is None else float(now)
+    summary = "resource spike " + (
+        f"group {recurrence_group}" if recurrence_group else f"process-key {process_key}"
+    )
+    query = {
+        "event_id": "investigation-suggestion-query",
+        "summary": summary,
+        "vector": embed_text(summary),
+        "payload": {
+            "process_key": str(process_key),
+            "recurrence_group": str(recurrence_group),
+        },
+    }
+    try:
+        with VectorEventStore(db_path) as store:
+            feedback = store.investigation_feedback(
+                query,
+                since=current - max(1.0, float(lookback_days)) * 86400,
+                threshold=0.82,
+            )
+    except (OSError, sqlite3.Error):
+        return ""
+    if not feedback:
+        return ""
+    priorities = {"actionable": 0, "uncertain": 1, "normal": 2}
+    candidates = [item for _, item in feedback]
+    candidates.sort(
+        key=lambda item: (
+            priorities.get(str(item.get("payload", {}).get("classification")), 3),
+            -float(item.get("timestamp") or 0),
+        )
+    )
+    payload = candidates[0].get("payload", {})
+    classification = str(payload.get("classification") or "uncertain")
+    confidence = round(_float(payload.get("confidence")) * 100)
+    finding = _sanitize_investigation_text(payload.get("summary"), 500)
+    remedy = _sanitize_investigation_text(payload.get("remedy"), 500)
+    if not finding:
+        return ""
+    result = f"Prior investigation ({classification}, {confidence}% confidence): {finding}"
+    if remedy:
+        result += f" Suggested follow-up: {remedy}"
+    return result
 
 
 class ActivityWatchContext:
@@ -454,6 +694,33 @@ class VectorEventStore:
                 matches.append((score, candidate))
         return sorted(matches, key=lambda item: (item[0], item[1]["timestamp"]), reverse=True)
 
+    def investigation_feedback(
+        self,
+        event: dict[str, Any],
+        *,
+        since: float,
+        threshold: float,
+    ) -> list[tuple[float, dict[str, Any]]]:
+        """Return identity-linked or semantically similar prior investigation outcomes."""
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        group = str(payload.get("recurrence_group") or "")
+        process_key = str(payload.get("process_key") or "")
+        matches: list[tuple[float, dict[str, Any]]] = []
+        for row in self.connection.execute(
+            "SELECT * FROM events WHERE kind='investigation-summary' AND timestamp>=? ORDER BY timestamp DESC LIMIT 200",
+            (float(since),),
+        ):
+            candidate = self._row(row)
+            candidate_payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
+            same_identity = bool(
+                (group and candidate_payload.get("recurrence_group") == group)
+                or (process_key and candidate_payload.get("process_key") == process_key)
+            )
+            score = cosine_similarity(event.get("vector", []), candidate.get("vector", []))
+            if same_identity or (not group and not process_key and score >= threshold):
+                matches.append((score, candidate))
+        return sorted(matches, key=lambda item: (item[1]["timestamp"], item[0]), reverse=True)
+
     def context_events(self, timestamps: Sequence[float], window: float) -> list[dict[str, Any]]:
         if not timestamps or window <= 0:
             return []
@@ -487,6 +754,23 @@ class VectorEventStore:
             "response": row["response"], "model": row["model"],
             "diagnosis": json.loads(row["diagnosis_json"] or "{}")}
 
+    def latest_investigation_summary(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT timestamp, payload_json FROM events WHERE kind='investigation-summary' "
+            "ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"] or "{}")
+        return {
+            "timestamp": float(row["timestamp"]),
+            "incident_id": str(payload.get("incident_id") or ""),
+            "classification": str(payload.get("classification") or "uncertain"),
+            "summary": str(payload.get("summary") or ""),
+            "remedy": str(payload.get("remedy") or ""),
+            "confidence": _float(payload.get("confidence")),
+        }
+
     def set_health(self, *, now: float, success: bool, error: str = "", embedding_error: str = "") -> None:
         previous = self.connection.execute(
             "SELECT last_success_at FROM worker_health WHERE singleton=1"
@@ -508,7 +792,15 @@ class VectorEventStore:
         events = self.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         diagnoses = self.connection.execute("SELECT COUNT(*) FROM diagnoses").fetchone()[0]
         pending = self.connection.execute("SELECT COUNT(*) FROM events WHERE kind='resource-spike' AND reviewed_at IS NULL").fetchone()[0]
-        return {"events": int(events), "stored_diagnoses": int(diagnoses), "pending_spikes": int(pending)}
+        investigations = self.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE kind='investigation-summary'"
+        ).fetchone()[0]
+        return {
+            "events": int(events),
+            "stored_diagnoses": int(diagnoses),
+            "pending_spikes": int(pending),
+            "investigation_summaries": int(investigations),
+        }
 
     def diagnoses_since(self, timestamp: float) -> int:
         return int(self.connection.execute(
@@ -844,6 +1136,7 @@ def run_cycle(config: dict[str, Any] | None = None, *, db_path: Path = DB_PATH,
     provider = ResilientEmbeddingProvider(api)
     embedder = embedding_fn or (embed_text if diagnoser is not None else provider)
     engine, diagnoses, added, errors = diagnoser or api, 0, 0, []
+    false_positive_suppressions = 0
     aw = activitywatch
     if aw is None and diagnoser is None:
         aw = ActivityWatchContext(str(setting(cfg, "activity_intelligence_activitywatch_host")))
@@ -852,6 +1145,17 @@ def run_cycle(config: dict[str, Any] | None = None, *, db_path: Path = DB_PATH,
         added += sync_resource_incidents(store, state_path=resource_state_path,
                                          app_usage_path=app_usage_path, context_minutes=context_window / 60,
                                          activitywatch=aw, sessions_root=sessions_root)
+        previous_health = store.health()
+        failure_retry = max(
+            0.0,
+            float(setting(cfg, "activity_intelligence_failure_retry_minutes")),
+        ) * 60
+        last_failure_at = _float(previous_health.get("last_run_at"), 0)
+        diagnosis_deferred = bool(
+            previous_health.get("last_error")
+            and last_failure_at
+            and now - last_failure_at < failure_retry
+        )
         available_budget = max(0, max_diagnoses - store.diagnoses_since(now - 86400))
         for event in store.unreviewed_spikes():
             matches = store.similar_events(event, since=event["timestamp"] - lookback, threshold=similarity)
@@ -864,20 +1168,55 @@ def run_cycle(config: dict[str, Any] | None = None, *, db_path: Path = DB_PATH,
             ):
                 store.mark_reviewed(event["event_id"], now)
                 continue
+            feedback = store.investigation_feedback(
+                event,
+                since=event["timestamp"] - lookback,
+                threshold=similarity,
+            )
+            normal_feedback = [
+                item
+                for _, item in feedback
+                if item.get("payload", {}).get("classification") == "normal"
+                and item.get("payload", {}).get("incident_id")
+                and _float(item.get("payload", {}).get("confidence"))
+                >= INVESTIGATION_FEEDBACK_MIN_CONFIDENCE
+            ]
+            normal_incidents = {
+                str(item.get("payload", {}).get("incident_id"))
+                for item in normal_feedback
+            }
+            actionable_feedback = [
+                item
+                for _, item in feedback
+                if item.get("payload", {}).get("classification") == "actionable"
+            ]
+            if (
+                len(normal_incidents) >= INVESTIGATION_FEEDBACK_MIN_NORMAL
+                and not actionable_feedback
+            ):
+                store.mark_reviewed(event["event_id"], now)
+                false_positive_suppressions += 1
+                continue
             vector = centroid(x["vector"] for x in pattern)
             if store.has_recent_similar_diagnosis(vector, since=now - cooldown, threshold=diagnosis_similarity):
                 store.mark_reviewed(event["event_id"], now)
                 continue
             if diagnoses >= available_budget:
                 break
+            if diagnosis_deferred:
+                break
             context = store.context_events([x["timestamp"] for x in pattern], context_window)
+            context_by_id = {item["event_id"]: item for item in context}
+            for _, item in feedback[:8]:
+                context_by_id[item["event_id"]] = item
+            context = sorted(context_by_id.values(), key=lambda item: item["timestamp"])
             result = engine.diagnose(build_diagnosis_prompt(pattern, context))
             if not isinstance(result, DiagnosisResult):
                 result = DiagnosisResult(bool(result), text=str(result or ""))
-            store.mark_reviewed(event["event_id"], now)
             if not result.ok:
                 errors.append(result.error or "diagnosis failed")
-                continue
+                break
+            store.mark_reviewed(event["event_id"], now)
             store.add_diagnosis(created_at=now, trigger_event_id=event["event_id"], pattern_vector=vector,
                                 event_ids=[x["event_id"] for x in pattern], response=result.text,
                                 model=result.model, diagnosis=result.diagnosis)
@@ -891,15 +1230,24 @@ def run_cycle(config: dict[str, Any] | None = None, *, db_path: Path = DB_PATH,
         store.prune(now=now, retention_days=float(setting(cfg, "activity_intelligence_retention_days")),
                     diagnosis_retention_days=float(setting(cfg, "activity_intelligence_diagnosis_retention_days")),
                     max_events=int(setting(cfg, "activity_intelligence_max_events")))
-        store.set_health(
-            now=now,
-            success=not errors,
-            error="; ".join(errors),
-            embedding_error=provider.last_error if embedding_fn is None and diagnoser is None else "",
-        )
+        if not diagnosis_deferred:
+            store.set_health(
+                now=now,
+                success=not errors,
+                error="; ".join(errors),
+                embedding_error=provider.last_error if embedding_fn is None and diagnoser is None else "",
+            )
         counts = store.counts()
         health = store.health()
-    return {"enabled": True, "events_added": added, "diagnoses": diagnoses, "errors": errors, **counts, "health": health}
+    return {
+        "enabled": True,
+        "events_added": added,
+        "diagnoses": diagnoses,
+        "false_positive_suppressions": false_positive_suppressions,
+        "errors": errors,
+        **counts,
+        "health": health,
+    }
 
 
 def launch_cycle(config: dict[str, Any] | None = None, *, base_dir: str | None = None) -> bool:
@@ -924,6 +1272,8 @@ def status(db_path: Path = DB_PATH) -> dict[str, Any]:
             "events": 0,
             "stored_diagnoses": 0,
             "pending_spikes": 0,
+            "investigation_summaries": 0,
+            "latest_investigation": None,
             "latest": None,
             "health": {
                 "last_run_at": None,
@@ -934,7 +1284,12 @@ def status(db_path: Path = DB_PATH) -> dict[str, Any]:
             },
         }
     with VectorEventStore(db_path) as store:
-        return {**store.counts(), "latest": store.latest_diagnosis(), "health": store.health()}
+        return {
+            **store.counts(),
+            "latest": store.latest_diagnosis(),
+            "latest_investigation": store.latest_investigation_summary(),
+            "health": store.health(),
+        }
 
 
 def _lock() -> Any | None:
@@ -954,6 +1309,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", metavar="command", required=True)
     sub.add_parser("process", help="Ingest observations and diagnose eligible patterns")
     sub.add_parser("status", help="Print local store and worker health as JSON")
+    capture = sub.add_parser("capture", help="Store a bounded completed-investigation summary")
+    capture.add_argument("--token", required=True)
+    capture.add_argument("--started-at", required=True, type=float)
+    capture.add_argument("--incident-id", default="")
+    capture.add_argument("--process-key", default="")
+    capture.add_argument("--recurrence-group", default="")
     record = sub.add_parser("record", help="Append one sanitized external observation")
     for name in ("source", "kind", "summary"):
         record.add_argument(f"--{name}", required=True)
@@ -972,6 +1333,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "status":
         print(json.dumps(status(), indent=2, sort_keys=True))
+        return 0
+    if args.command == "capture":
+        event = capture_investigation_summary(
+            token=args.token,
+            started_at=args.started_at,
+            incident_id=args.incident_id,
+            process_key=args.process_key,
+            recurrence_group=args.recurrence_group,
+        )
+        print(json.dumps({"stored": bool(event), "event_id": event.get("event_id") if event else None}))
         return 0
     try:
         payload = json.loads(args.payload_json)

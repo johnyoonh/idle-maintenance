@@ -279,6 +279,17 @@ def investigation_prompt(core: Any, proc: dict[str, Any], config: dict[str, Any]
     return "\n".join(lines)
 
 
+def investigation_capture_context(proc: dict[str, Any]) -> dict[str, str]:
+    guidance = known_process_guidance(proc) or {}
+    return {
+        "incident_id": str(proc.get("incident_id") or ""),
+        "process_key": str(proc.get("process_key") or ""),
+        "recurrence_group": str(
+            proc.get("recurrence_group") or guidance.get("recurrence_group") or ""
+        ),
+    }
+
+
 def terminate(
     proc: dict[str, Any],
     config: dict[str, Any],
@@ -327,7 +338,9 @@ def handle_process_action(core: Any, proc: dict[str, Any], action: str, config: 
         return outcome
     if action == "INVESTIGATE":
         opened, terminal_app, prompt_copied = core.open_codex_in_terminal(
-            investigation_prompt(core, proc, config), core.process_cwd(proc)
+            investigation_prompt(core, proc, config),
+            core.process_cwd(proc),
+            investigation_context=investigation_capture_context(proc),
         )
         if opened:
             core.log(
