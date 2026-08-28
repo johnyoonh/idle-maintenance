@@ -9,7 +9,7 @@ The menu-bar app exposes:
 - **Review Recent I/O Incidents…** — opens maintenance status with monitor health, queued prompts, and recent incidents.
 - **Sample CPU + Disk I/O (1 min)** — runs the existing manual process audit, which samples both sustained CPU and process I/O.
 
-The resident resource monitor sends a notification when a qualifying incident opens. A first incident is queued and its review window is shown only after the user has been idle for at least 15 minutes and then returns. A recurrence for the same process identity within 30 minutes prompts immediately. Notification delivery is deduplicated per process identity for six hours.
+The resident resource monitor sends a notification when a qualifying incident opens. Every non-suppressed incident is queued, including a recurrence, and its review window can open only after a fresh HID sample reports 30 seconds to 5 minutes of quiet input. Notification delivery is deduplicated per process identity for six hours.
 
 A queued process window is skipped if the process exits or its identity changes before review. The absence of a return-time window therefore does not prove that no incident was recorded; use `maint status` to inspect recent history.
 
