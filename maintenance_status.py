@@ -206,6 +206,9 @@ def resource_monitor_status(
         "last_idle_sample_error": last_idle_sample_error,
         "return_routing_enabled": bool(health.get("return_routing_enabled", True)),
         "return_active_cutoff_seconds": health.get("return_active_cutoff_seconds", 30),
+        "return_review_pending": bool(health.get("return_review_pending", False)),
+        "prompt_idle_seconds": health.get("prompt_idle_seconds", 30),
+        "prompt_idle_max_seconds": health.get("prompt_idle_max_seconds", 300),
         "last_return_flow_at": state.get("last_return_flow_at") or health.get("last_return_flow_at"),
         "last_return_success_at": return_health.get("last_success_at") or health.get("last_return_success_at"),
         "last_return_error": last_return_error,
@@ -255,6 +258,10 @@ def render_text(status: dict[str, Any]) -> str:
             f"- HID idle sample: {monitor['idle_sample_seconds']:.1f}s"
             if monitor["idle_sample_available"] and monitor["idle_sample_seconds"] is not None
             else f"- HID idle sample: unavailable ({monitor['last_idle_sample_error'] or 'not sampled yet'})"
+        ),
+        (
+            f"- Review popup gate: {monitor['prompt_idle_seconds']:.0f}–"
+            f"{monitor['prompt_idle_max_seconds']:.0f}s HID idle; one prompt per fresh sample"
         ),
         f"- Resume routing: {return_summary}",
         f"- Attribution: {monitor['attribution_boundary']}",

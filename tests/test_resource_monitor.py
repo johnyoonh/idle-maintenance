@@ -52,6 +52,8 @@ class ResourceMonitorTests(unittest.TestCase):
             "resource_monitor_recovery_cool_samples": 6,
             "resource_monitor_notification_cooldown_seconds": 6 * 3600,
             "resource_monitor_recurrence_seconds": 30 * 60,
+            "review_prompt_idle_seconds": 30,
+            "review_prompt_idle_max_seconds": 300,
             "resource_monitor_incident_limit": 4,
             "resource_monitor_history_limit": 5,
             "return_from_away_minutes": 15,
@@ -207,6 +209,8 @@ class ResourceMonitorTests(unittest.TestCase):
         current = self.cool_and_recover(current, samples=1)
         self.assertEqual(incident["status"], "recovered")
         self.assertEqual(self.monitor.state["active"], {})
+        self.assertEqual(incident["prompt_status"], "cancelled")
+        self.assertEqual(self.monitor.state["pending_prompts"], [])
 
     def test_notification_dedupe_and_six_hour_cooldown(self):
         current, first = self.open_incident()
@@ -225,7 +229,7 @@ class ResourceMonitorTests(unittest.TestCase):
         self.observe({42: p3}, {42: p4})
         self.assertEqual(len(self.notifications), 2)
 
-    def test_second_incident_within_thirty_minutes_prompts_immediately(self):
+    def test_second_incident_within_thirty_minutes_is_queued(self):
         current, first = self.open_incident()
         current = self.cool_and_recover(current)
         self.clock += 5 * 60
@@ -235,10 +239,11 @@ class ResourceMonitorTests(unittest.TestCase):
         self.observe({42: p1}, {42: p2})
         second = self.monitor.state["incidents"][-1]
         self.assertTrue(second["recurrence"])
-        self.assertEqual(second["prompt_status"], "completed")
-        self.assertEqual(len(self.prompts), 1)
+        self.assertEqual(second["prompt_status"], "queued")
+        self.assertEqual(self.monitor.state["pending_prompts"], [second["id"]])
+        self.assertEqual(self.prompts, [])
 
-    def test_queued_prompt_waits_for_idle_return(self):
+    def test_queued_prompt_waits_for_quiet_idle_window(self):
         current, incident = self.open_incident()
         self.assertEqual(self.prompts, [])
         next_value = proc(read=current["io_read_bytes"] + MIB, write=current["io_write_bytes"])
@@ -246,8 +251,21 @@ class ResourceMonitorTests(unittest.TestCase):
         self.assertEqual(self.prompts, [])
         final = proc(read=next_value["io_read_bytes"] + MIB, write=next_value["io_write_bytes"])
         self.observe({42: next_value}, {42: final}, system=10, idle=0)
+        self.assertEqual(self.prompts, [])
+        quiet = proc(read=final["io_read_bytes"] + MIB, write=final["io_write_bytes"])
+        self.observe({42: final}, {42: quiet}, system=10, idle=30)
         self.assertEqual(len(self.prompts), 1)
         self.assertEqual(incident["prompt_status"], "completed")
+
+    def test_delivery_refuses_recovered_incident(self):
+        _current, incident = self.open_incident()
+        incident["status"] = "recovered"
+
+        self.monitor._deliver_prompt(incident, self.clock)
+
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(incident["prompt_status"], "cancelled")
+        self.assertEqual(self.monitor.state["pending_prompts"], [])
 
     def test_atomic_persistence_and_bounded_retention(self):
         self.open_incident()

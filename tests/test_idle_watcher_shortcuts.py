@@ -6,6 +6,31 @@ import idle_watcher
 
 
 class IdleWatcherShortcutTests(unittest.TestCase):
+    def test_automatic_review_waits_for_quiet_input_window(self):
+        state = {"was_idle": False, "review_pending": False}
+
+        def sample(idle_time):
+            state["was_idle"], state["review_pending"], trigger = (
+                idle_watcher.review_gate_transition(
+                    idle_time,
+                    was_idle=state["was_idle"],
+                    review_pending=state["review_pending"],
+                    away_seconds=600,
+                    active_cutoff_seconds=30,
+                    review_idle_seconds=30,
+                    review_idle_max_seconds=300,
+                )
+            )
+            return trigger
+
+        self.assertFalse(sample(601))
+        self.assertFalse(sample(0))
+        self.assertTrue(state["review_pending"])
+        self.assertFalse(sample(10))
+        self.assertFalse(sample(300))
+        self.assertTrue(sample(30))
+        self.assertFalse(state["review_pending"])
+
     def test_trigger_runs_resume_router_after_interactive_reviews(self):
         events = []
 

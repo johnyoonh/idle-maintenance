@@ -234,9 +234,10 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
             self.assertNotEqual(monitor.state["incidents"][0]["process_key"], second["process_key"])
             self.assertTrue(second["recurrence"])
             self.assertEqual("review", second["triage"]["decision"])
-            self.assertEqual("completed", second["prompt_status"])
+            self.assertEqual("queued", second["prompt_status"])
+            self.assertEqual([second["id"]], monitor.state["pending_prompts"])
             self.assertEqual(1, len(notifications))
-            self.assertEqual(1, len(prompts))
+            self.assertEqual([], prompts)
 
     def test_extreme_known_io_still_queues_review(self):
         with tempfile.TemporaryDirectory() as directory:

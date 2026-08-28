@@ -61,6 +61,8 @@ DEFAULT_CONFIG = {
     "resource_monitor_notification_cooldown_seconds": 6 * 3600,
     "resource_monitor_known_notification_cooldown_seconds": 24 * 3600,
     "resource_monitor_recurrence_seconds": 30 * 60,
+    "review_prompt_idle_seconds": 30,
+    "review_prompt_idle_max_seconds": 5 * 60,
     "activity_intelligence_enabled": True,
     "activity_intelligence_min_pattern_events": 3,
     "activity_intelligence_similarity_threshold": 0.82,

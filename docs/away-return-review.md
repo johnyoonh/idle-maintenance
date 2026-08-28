@@ -34,7 +34,7 @@ The menu item **Refresh & Review Shortcuts** and the global Hammerspoon binding 
 
 ## Automatic away-return review
 
-The resident resource monitor is the authoritative return detector. It polls HID idle time even when no process incident is queued, so automatic resume routing does not depend on the legacy `idle_watcher.py` process being enabled.
+The resident resource monitor is the authoritative return detector. It polls HID idle time even when no process incident is queued, so automatic resume routing does not depend on the legacy `idle_watcher.py` process being enabled. A return is recorded immediately, but the review and resume handoff wait until HID input has been quiet for 30 seconds; they do not open while the user is actively typing or moving the pointer.
 
 Default policy:
 

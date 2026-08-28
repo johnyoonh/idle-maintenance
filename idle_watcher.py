@@ -19,6 +19,26 @@ def get_idle_time_seconds():
     return float(subprocess.check_output(cmd, shell=True).strip())
 
 
+def review_gate_transition(
+    idle_time,
+    *,
+    was_idle,
+    review_pending,
+    away_seconds,
+    active_cutoff_seconds,
+    review_idle_seconds,
+    review_idle_max_seconds,
+):
+    """Advance the legacy review gate without observing individual input events."""
+    if idle_time > away_seconds:
+        return True, review_pending, False
+    if was_idle and idle_time < active_cutoff_seconds:
+        return False, True, False
+    if review_pending and review_idle_seconds <= idle_time < review_idle_max_seconds:
+        return was_idle, False, True
+    return was_idle, review_pending, False
+
+
 def trigger_maintenance(
     *,
     command_runner=subprocess.run,
@@ -148,24 +168,41 @@ def main():
             0.0,
             float(config.get("post_trigger_cooldown_seconds", 3600)),
         )
+        active_cutoff_seconds = max(
+            0.0,
+            float(config.get("return_active_cutoff_seconds", 30)),
+        )
+        review_idle_seconds = max(
+            active_cutoff_seconds,
+            float(config.get("review_prompt_idle_seconds", 30)),
+        )
+        review_idle_max_seconds = max(
+            review_idle_seconds,
+            float(config.get("review_prompt_idle_max_seconds", 5 * 60)),
+        )
 
         # This watcher is opt-in. Starting it intentionally runs one review immediately.
         trigger_maintenance()
         last_triggered = time.time()
 
         was_idle = False
+        review_pending = False
         while True:
             idle_time = get_idle_time_seconds()
+            was_idle, review_pending, should_review = review_gate_transition(
+                idle_time,
+                was_idle=was_idle,
+                review_pending=review_pending,
+                away_seconds=idle_threshold_seconds,
+                active_cutoff_seconds=active_cutoff_seconds,
+                review_idle_seconds=review_idle_seconds,
+                review_idle_max_seconds=review_idle_max_seconds,
+            )
 
-            if idle_time > idle_threshold_seconds:
-                was_idle = True
-            elif was_idle and idle_time < 30:
-                # The handoff and popup reset idle time, so require the configured
-                # cooldown before another away-return review can run.
+            if should_review:
                 if time.time() - last_triggered >= post_trigger_cooldown_seconds:
                     trigger_maintenance()
                     last_triggered = time.time()
-                was_idle = False
                 time.sleep(post_trigger_cooldown_seconds)
 
             time.sleep(check_interval_seconds)

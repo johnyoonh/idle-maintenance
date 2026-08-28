@@ -25,6 +25,8 @@ class ReturnFlowTests(unittest.TestCase):
             "system_disk_busy_mib_per_second": 50,
             "idle_threshold_minutes": 10,
             "return_from_away_minutes": 15,
+            "review_prompt_idle_seconds": 30,
+            "review_prompt_idle_max_seconds": 300,
             "post_trigger_cooldown_seconds": 3600,
         }
         self.events = []
@@ -55,40 +57,105 @@ class ReturnFlowTests(unittest.TestCase):
         self.assertEqual(self.events, [])
 
         self.observe(idle=0, now=1010)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.monitor.state["return_pending"])
+
+        self.observe(idle=30, now=1040)
 
         self.assertEqual(self.events, ["return"])
         self.assertFalse(self.monitor.state["return_armed"])
-        self.assertEqual(self.monitor.state["last_return_flow_at"], 1010)
-        self.assertEqual(self.monitor.state["return_health"]["last_success_at"], 1010)
+        self.assertFalse(self.monitor.state["return_pending"])
+        self.assertEqual(self.monitor.state["last_return_flow_at"], 1040)
+        self.assertEqual(self.monitor.state["return_health"]["last_success_at"], 1040)
 
-    def test_process_prompt_precedes_resume_router(self):
-        incident = {"id": "queued"}
-        self.monitor.state["incidents"] = [incident]
-        self.monitor.state["pending_prompts"] = [incident["id"]]
+    def queue_incidents(self, count=1):
+        incidents = [
+            {"id": f"queued-{index}", "status": "active"}
+            for index in range(count)
+        ]
+        self.monitor.state["incidents"] = incidents
+        self.monitor.state["pending_prompts"] = [item["id"] for item in incidents]
 
         def deliver(current, _now):
             self.events.append("prompt")
             self.monitor.state["pending_prompts"].remove(current["id"])
 
         self.monitor._deliver_prompt = deliver
+        return incidents
+
+    def test_process_prompt_waits_until_user_is_quiet_after_return(self):
+        self.queue_incidents()
 
         self.observe(idle=901, now=2000)
-        self.assertTrue(self.monitor.state["idle_armed"])
         self.assertTrue(self.monitor.state["return_armed"])
 
         self.observe(idle=0, now=2010)
+        self.assertEqual(self.events, [])
 
+        self.observe(idle=30, now=2040)
+        self.assertEqual(self.events, ["prompt"])
+
+        self.observe(idle=30, now=2070)
         self.assertEqual(self.events, ["prompt", "return"])
+
+    def test_active_input_and_extended_away_time_keep_prompt_queued(self):
+        incident = self.queue_incidents()[0]
+
+        self.observe(idle=0, now=2100)
+        self.assertEqual(self.events, [])
+        self.assertIn(incident["id"], self.monitor.state["pending_prompts"])
+
+        self.observe(idle=300, now=2110)
+        self.observe(idle=900, now=2120)
+        self.assertEqual(self.events, [])
+        self.assertIn(incident["id"], self.monitor.state["pending_prompts"])
+
+        self.observe(idle=299, now=2130)
+
+        self.assertEqual(self.events, ["prompt"])
+        self.assertNotIn(incident["id"], self.monitor.state["pending_prompts"])
+
+    def test_only_one_prompt_is_delivered_per_fresh_idle_sample(self):
+        incidents = self.queue_incidents(count=2)
+
+        self.monitor.observe(
+            {},
+            {},
+            {"available": True, "mib_per_second": 0, "error": ""},
+            seconds=10,
+            idle_seconds=30,
+            idle_sample_fresh=True,
+            now=2200,
+        )
+        self.monitor.observe(
+            {},
+            {},
+            {"available": True, "mib_per_second": 0, "error": ""},
+            seconds=10,
+            idle_seconds=30,
+            idle_sample_fresh=False,
+            now=2210,
+        )
+
+        self.assertEqual(self.events, ["prompt"])
+        self.assertEqual(self.monitor.state["pending_prompts"], [incidents[1]["id"]])
+
+        self.observe(idle=30, now=2230)
+        self.assertEqual(self.events, ["prompt", "prompt"])
+        self.assertEqual(self.monitor.state["pending_prompts"], [])
 
     def test_cooldown_requires_another_away_return_cycle(self):
         self.observe(idle=601, now=3000)
         self.observe(idle=0, now=3010)
+        self.observe(idle=30, now=3040)
         self.observe(idle=601, now=3500)
         self.observe(idle=0, now=3510)
+        self.observe(idle=30, now=3540)
         self.assertEqual(self.events, ["return"])
 
         self.observe(idle=601, now=7000)
         self.observe(idle=0, now=7010)
+        self.observe(idle=30, now=7040)
         self.assertEqual(self.events, ["return", "return"])
 
     def test_return_failure_is_recorded_without_raising(self):
@@ -98,10 +165,11 @@ class ReturnFlowTests(unittest.TestCase):
         self.monitor.return_fn = fail
         self.observe(idle=601, now=8000)
         self.observe(idle=0, now=8010)
+        self.observe(idle=30, now=8040)
 
         health = self.monitor.state["return_health"]
         self.assertEqual(health["last_error"], "synthetic return failure")
-        self.assertEqual(health["last_error_at"], 8010)
+        self.assertEqual(health["last_error_at"], 8040)
 
     def test_unknown_idle_sample_preserves_armed_return(self):
         self.observe(idle=601, now=8_100)
@@ -126,6 +194,8 @@ class ReturnFlowTests(unittest.TestCase):
         self.monitor.config["return_active_cutoff_seconds"] = 45
         self.observe(idle=601, now=8_300)
         self.observe(idle=40, now=8_310)
+        self.assertEqual(self.events, [])
+        self.observe(idle=45, now=8_340)
         self.assertEqual(self.events, ["return"])
 
     def test_idle_reader_returns_unknown_on_command_or_parse_failure(self):

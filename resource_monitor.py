@@ -80,6 +80,7 @@ def _default_state() -> dict[str, Any]:
         "pending_prompts": [],
         "idle_armed": False,
         "return_armed": False,
+        "return_pending": False,
         "last_return_flow_at": 0.0,
         "return_health": {},
     }
@@ -314,6 +315,7 @@ class ResourceMonitor:
             tuple(self.state.get("pending_prompts", [])),
             bool(self.state.get("idle_armed")),
             bool(self.state.get("return_armed")),
+            bool(self.state.get("return_pending")),
             float(self.state.get("last_return_flow_at") or 0),
             incidents,
             prompt_error,
@@ -425,7 +427,7 @@ class ResourceMonitor:
             "ended_at": None,
             "cool_samples": 0,
             "status": "active",
-            "prompt_status": "immediate" if recurrence else ("suppressed" if suppressed else "queued"),
+            "prompt_status": "suppressed" if suppressed else "queued",
             "recurrence": recurrence,
             "triage": resource_triage,
             "system_mib_s": round(system_rate, 3),
@@ -445,7 +447,7 @@ class ResourceMonitor:
             incident["known_process"] = guidance
         self.state["incidents"].append(incident)
         self.state["active"][instance] = incident_id
-        if not recurrence and not suppressed:
+        if not suppressed:
             self.state["pending_prompts"].append(incident_id)
         self._history(
             "opened",
@@ -493,80 +495,103 @@ class ResourceMonitor:
             self.notify_fn(title, message)
             self.state["notifications"][notification_key] = now
             incident["notified_at"] = now
-        if recurrence:
-            self._deliver_prompt(incident, now)
         return incident
 
     def _deliver_prompt(self, incident: dict[str, Any], now: float) -> None:
-        expected = incident.get("process_snapshot") or {}
-        current = self.identity_reader(int(incident["pid"]))
-        if not identity.same(expected, current):
-            incident["prompt_status"] = "stale"
+        if incident.get("status", "active") != "active":
+            incident["prompt_status"] = "cancelled"
             incident["prompted_at"] = now
-            self._history("prompt-skipped", incident, reason="process identity changed")
+            self._history("prompt-skipped", incident, reason="incident is no longer active")
         else:
-            try:
-                action = self.prompt_fn(current, incident)
-            except Exception as error:
-                detail = str(error).strip() or type(error).__name__
-                incident["prompt_status"] = "failed"
-                incident["prompt_error"] = detail[:500]
-                incident["prompted_at"] = now
-                self.state["prompt_health"] = {
-                    "last_error": detail[:500],
-                    "last_error_at": now,
-                }
-                self._history("prompt-failed", incident, error=detail[:500])
+            expected = incident.get("process_snapshot") or {}
+            current = self.identity_reader(int(incident["pid"]))
+            if identity.same(expected, current):
+                try:
+                    action = self.prompt_fn(current, incident)
+                except Exception as error:
+                    detail = str(error).strip() or type(error).__name__
+                    incident["prompt_status"] = "failed"
+                    incident["prompt_error"] = detail[:500]
+                    incident["prompted_at"] = now
+                    self.state["prompt_health"] = {
+                        "last_error": detail[:500],
+                        "last_error_at": now,
+                    }
+                    self._history("prompt-failed", incident, error=detail[:500])
+                else:
+                    incident["prompt_status"] = "completed"
+                    incident["prompt_action"] = str(action)
+                    incident["prompted_at"] = now
+                    self.state["prompt_health"] = {
+                        "last_error": "",
+                        "last_success_at": now,
+                    }
+                    self._history("prompted", incident, action=str(action))
             else:
-                incident["prompt_status"] = "completed"
-                incident["prompt_action"] = str(action)
+                incident["prompt_status"] = "stale"
                 incident["prompted_at"] = now
-                self.state["prompt_health"] = {
-                    "last_error": "",
-                    "last_success_at": now,
-                }
-                self._history("prompted", incident, action=str(action))
+                self._history("prompt-skipped", incident, reason="process identity changed")
         self.state["pending_prompts"] = [
             value for value in self.state["pending_prompts"] if value != incident["id"]
         ]
 
     def _handle_idle_return(self, idle_seconds: float, now: float) -> None:
-        prompt_threshold = max(
+        active_cutoff = max(
             0.0,
-            float(self.config.get("return_from_away_minutes", 15)),
-        ) * 60
+            float(self.config.get("return_active_cutoff_seconds", 30)),
+        )
+        prompt_idle_seconds = max(
+            active_cutoff,
+            float(self.config.get("review_prompt_idle_seconds", 30)),
+        )
+        prompt_idle_max_seconds = max(
+            prompt_idle_seconds,
+            float(self.config.get("review_prompt_idle_max_seconds", 5 * 60)),
+        )
         return_threshold = max(
             0.0,
             float(self.config.get("idle_threshold_minutes", 10)),
         ) * 60
 
-        if self.state.get("pending_prompts"):
-            if idle_seconds >= prompt_threshold:
-                self.state["idle_armed"] = True
-            elif self.state.get("idle_armed") and idle_seconds < 60:
-                self.state["idle_armed"] = False
-                for incident_id in list(self.state["pending_prompts"]):
-                    incident = self._incident_by_id(incident_id)
-                    if incident:
-                        self._deliver_prompt(incident, now)
-        else:
-            self.state["idle_armed"] = False
+        # Review only from a fresh, cached HID sample in a bounded quiet window.
+        # Active input and extended away time both leave the incident queued.
+        self.state["idle_armed"] = False
+        prompt_delivered = False
+        if (
+            self.state.get("pending_prompts")
+            and prompt_idle_seconds <= idle_seconds < prompt_idle_max_seconds
+        ):
+            for incident_id in list(self.state["pending_prompts"]):
+                incident = self._incident_by_id(incident_id)
+                if incident is None:
+                    self.state["pending_prompts"].remove(incident_id)
+                    continue
+                if incident.get("status", "active") != "active":
+                    self._deliver_prompt(incident, now)
+                    continue
+                self._deliver_prompt(incident, now)
+                prompt_delivered = True
+                break
 
         if not bool(self.config.get("return_routing_enabled", True)):
             self.state["return_armed"] = False
+            self.state["return_pending"] = False
             return
 
         if idle_seconds > return_threshold:
             self.state["return_armed"] = True
             return
-        active_cutoff = max(
-            0.0,
-            float(self.config.get("return_active_cutoff_seconds", 30)),
-        )
-        if not self.state.get("return_armed") or idle_seconds >= active_cutoff:
+        if self.state.get("return_armed") and idle_seconds < active_cutoff:
+            self.state["return_armed"] = False
+            self.state["return_pending"] = True
+        if (
+            not self.state.get("return_pending")
+            or prompt_delivered
+            or not (prompt_idle_seconds <= idle_seconds < prompt_idle_max_seconds)
+        ):
             return
 
-        self.state["return_armed"] = False
+        self.state["return_pending"] = False
         cooldown = max(
             0.0,
             float(self.config.get("post_trigger_cooldown_seconds", 3600)),
@@ -599,6 +624,7 @@ class ResourceMonitor:
         *,
         seconds: float | None = None,
         idle_seconds: float | None = None,
+        idle_sample_fresh: bool = True,
         now: float | None = None,
     ) -> bool:
         """Consume one interval and persist lifecycle changes immediately, heartbeats at a bounded cadence."""
@@ -687,10 +713,22 @@ class ResourceMonitor:
                     incident["last_seen_at"] = observed_at
                     self.state["active"].pop(instance, None)
                     self._windows.pop(instance, None)
+                    if incident_id in self.state["pending_prompts"]:
+                        self.state["pending_prompts"] = [
+                            value
+                            for value in self.state["pending_prompts"]
+                            if value != incident_id
+                        ]
+                        incident["prompt_status"] = "cancelled"
+                        self._history(
+                            "prompt-skipped",
+                            incident,
+                            reason="incident recovered before review",
+                        )
                     self._history("recovered", incident, cool_samples=recovery_samples)
 
         idle_sample_available = idle_seconds is not None
-        if idle_sample_available:
+        if idle_sample_available and idle_sample_fresh:
             self._handle_idle_return(float(idle_seconds), observed_at)
         prompt_health = self.state.get("prompt_health") if isinstance(self.state.get("prompt_health"), dict) else {}
         return_health = self.state.get("return_health") if isinstance(self.state.get("return_health"), dict) else {}
@@ -703,8 +741,29 @@ class ResourceMonitor:
             "idle_poll_seconds": self.idle_poll_seconds,
             "idle_sample_available": idle_sample_available,
             "idle_sample_seconds": float(idle_seconds) if idle_sample_available else None,
-            "last_idle_sample_at": observed_at if idle_sample_available else previous_health.get("last_idle_sample_at"),
+            "last_idle_sample_at": (
+                observed_at
+                if idle_sample_available and idle_sample_fresh
+                else previous_health.get("last_idle_sample_at")
+            ),
             "last_idle_sample_error": "" if idle_sample_available else "HID idle time unavailable",
+            "prompt_idle_seconds": max(
+                max(
+                    0.0,
+                    float(self.config.get("return_active_cutoff_seconds", 30)),
+                ),
+                float(self.config.get("review_prompt_idle_seconds", 30)),
+            ),
+            "prompt_idle_max_seconds": max(
+                max(
+                    max(
+                        0.0,
+                        float(self.config.get("return_active_cutoff_seconds", 30)),
+                    ),
+                    float(self.config.get("review_prompt_idle_seconds", 30)),
+                ),
+                float(self.config.get("review_prompt_idle_max_seconds", 5 * 60)),
+            ),
             "return_routing_enabled": bool(self.config.get("return_routing_enabled", True)),
             "return_active_cutoff_seconds": max(
                 0.0,
@@ -717,6 +776,7 @@ class ResourceMonitor:
             "last_prompt_error_at": prompt_health.get("last_error_at"),
             "last_prompt_success_at": prompt_health.get("last_success_at"),
             "last_return_flow_at": self.state.get("last_return_flow_at"),
+            "return_review_pending": bool(self.state.get("return_pending")),
             "last_return_error": str(return_health.get("last_error") or ""),
             "last_return_error_at": return_health.get("last_error_at"),
             "last_return_success_at": return_health.get("last_success_at"),
@@ -793,9 +853,11 @@ def run_monitor(
             current = provider() if aggregate_hot else {}
 
             now_mono = monotonic_fn()
+            idle_sample_fresh = False
             if now_mono >= next_idle_poll_at:
                 cached_idle_seconds = idle_provider()
                 next_idle_poll_at = now_mono + monitor.idle_poll_seconds
+                idle_sample_fresh = True
             idle_seconds = cached_idle_seconds
 
             lifecycle_changed = monitor.observe(
@@ -804,6 +866,7 @@ def run_monitor(
                 status,
                 seconds=monitor.interval_seconds,
                 idle_seconds=idle_seconds,
+                idle_sample_fresh=idle_sample_fresh,
             )
             if lifecycle_changed is True and bool(cfg.get("activity_intelligence_enabled", True)):
                 try:
