@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import signal
 import subprocess
@@ -207,16 +208,18 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
 
 
 def process_headline(proc: dict[str, Any]) -> str:
-    """Return compact metrics for severity coloring in one-shot reviews."""
+    """Return compact peak metrics for severity coloring in one-shot reviews."""
     samples = proc.get("cpu_samples")
     if not isinstance(samples, list) or not samples:
         samples = [proc.get("cpu", 0)]
     cpu_values = []
     for value in samples:
         try:
-            cpu_values.append(float(value))
+            parsed = float(value)
         except (TypeError, ValueError):
             continue
+        if math.isfinite(parsed):
+            cpu_values.append(parsed)
     rates = proc.get("io_samples")
     io_values = []
     if isinstance(rates, list):
@@ -224,11 +227,13 @@ def process_headline(proc: dict[str, Any]) -> str:
             if not isinstance(rate, dict):
                 continue
             try:
-                io_values.append(float(rate.get("total_mib_s", 0) or 0))
+                parsed = float(rate.get("total_mib_s", 0) or 0)
             except (TypeError, ValueError):
                 continue
+            if math.isfinite(parsed):
+                io_values.append(parsed)
     if io_values and max(io_values) > 0:
-        return f"I/O peak {max(io_values):.1f} MiB/s • CPU {cpu_values[-1] if cpu_values else 0:.1f}%"
+        return f"I/O peak {max(io_values):.1f} MiB/s • CPU peak {max(cpu_values, default=0.0):.1f}%"
     return "CPU samples: " + ", ".join(f"{value:.1f}%" for value in (cpu_values or [0.0]))
 
 
