@@ -5,6 +5,7 @@ import json
 import time
 import sys
 import shlex
+import tempfile
 from idle_config import (
     APP_SUPPORT_DIR,
     DEFAULT_CONFIG,
@@ -472,11 +473,6 @@ def copy_text_to_clipboard(text):
         log(f"Failed to copy investigation prompt to clipboard: {e}")
         return False
 
-def run_applescript(script, args):
-    cmd = ["osascript", "-e", script, "--"]
-    cmd.extend(args)
-    return subprocess.run(cmd, capture_output=True, text=True)
-
 def process_cwd(proc, default="/"):
     try:
         result = subprocess.run(
@@ -499,44 +495,74 @@ def build_codex_investigation_command(prompt_text, cwd="/"):
     launch_cwd = cwd if os.path.isabs(cwd) and os.path.isdir(cwd) else "/"
     return "cd " + shlex.quote(launch_cwd) + " && codex " + shlex.quote(prompt_text)
 
-def open_codex_in_terminal(prompt_text, cwd="/"):
-    prompt_copied = copy_text_to_clipboard(prompt_text)
+def create_codex_launch_file(prompt_text, cwd="/", directory=None):
+    """Create a private, self-deleting command file for a terminal tab."""
     codex_command = build_codex_investigation_command(prompt_text, cwd)
+    descriptor, path = tempfile.mkstemp(
+        prefix="idle-maintenance-investigate-",
+        suffix=".command",
+        dir=directory,
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/zsh\n")
+            handle.write('rm -f -- "$0"\n')
+            handle.write("exec /bin/zsh -lic " + shlex.quote(codex_command) + "\n")
+        os.chmod(path, 0o700)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
 
-    iterm_script = """
-on run argv
-    set commandText to item 1 of argv
-    tell application "iTerm"
-        activate
-        if (count of windows) = 0 then
-            create window with default profile
-        else
-            tell current window
-                create tab with default profile
-            end tell
-        end if
-        tell current session of current window
-            write text commandText
-        end tell
-    end tell
-end run
-"""
-    terminal_script = """
-on run argv
-    set commandText to item 1 of argv
-    tell application "Terminal"
-        activate
-        do script commandText
-    end tell
-end run
-"""
 
-    for app_name, script in (("iTerm", iterm_script), ("Terminal", terminal_script)):
-        result = run_applescript(script, [codex_command])
+def open_codex_in_terminal(
+    prompt_text,
+    cwd="/",
+    launch_runner=subprocess.run,
+    clipboard_fn=copy_text_to_clipboard,
+    launch_directory=None,
+):
+    """Open an investigation in a new terminal tab without Apple Events/TCC."""
+    prompt_copied = clipboard_fn(prompt_text)
+    try:
+        launch_file = create_codex_launch_file(prompt_text, cwd, launch_directory)
+    except OSError as error:
+        log(f"Failed to create Codex investigation launch file: {error}")
+        return False, None, prompt_copied
+
+    launchers = (
+        ("iTerm", ["/usr/bin/open", "-b", "com.googlecode.iterm2", launch_file]),
+        ("Terminal", ["/usr/bin/open", "-b", "com.apple.Terminal", launch_file]),
+    )
+    for app_name, command in launchers:
+        try:
+            result = launch_runner(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            log(f"Failed to open {app_name} for Codex investigation: {error}")
+            continue
         if result.returncode == 0:
             return True, app_name, prompt_copied
-        log(f"Failed to open {app_name} for Codex investigation: {result.stderr.strip()}")
+        detail = (result.stderr or result.stdout or f"open exited {result.returncode}").strip()
+        log(f"Failed to open {app_name} for Codex investigation: {detail}")
 
+    try:
+        os.unlink(launch_file)
+    except OSError:
+        pass
     return False, None, prompt_copied
 
 def kill_process(pid):
@@ -633,8 +659,16 @@ def run_process_audit(config, prompt_budget=None):
             if not opened:
                 if prompt_copied:
                     log(f"Copied Codex investigation prompt for {proc['comm']} to clipboard.")
+                    notify_user(
+                        "Idle Maintenance",
+                        "Could not open an investigation tab; the prompt was copied to the clipboard.",
+                    )
                 else:
                     log(f"Failed to open Codex investigation prompt for {proc['comm']}.")
+                    notify_user(
+                        "Idle Maintenance",
+                        "Could not open or copy the investigation prompt. See IdleMaintenance.log.",
+                    )
             for q_item in current_queue:
                 if q_item.get("comm") == item["comm"]:
                     q_item["last_prompted"] = int(time.time())

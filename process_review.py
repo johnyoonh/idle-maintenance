@@ -13,6 +13,7 @@ from idle_config import APP_SUPPORT_DIR, atomic_write_json, keep_entry_is_active
 import process_identity as identity
 from process_sampling import get_candidate_processes
 from process_triage import triage_process
+from prompt_session import legacy_prompt
 
 _LOCK = None
 ATTRIBUTION_NOTE = (
@@ -160,27 +161,23 @@ def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, ke
     if isinstance(resource_triage, dict):
         detail += f"\nTriage: {resource_triage.get('decision', 'review')} — {resource_triage.get('reason', '')}"
     policy = process_action_policy(proc)
-    command = [
-        "swift",
-        os.path.join(core.BASE_DIR, "prompt.swift"),
-        _display(proc),
-        proc.get("command") or proc.get("comm", ""),
-        "false",
-        "process",
-        detail,
-        str(snooze_hours),
-        str(keep_days),
-        policy,
-    ]
+    payload = {
+        "name": _display(proc),
+        "path": proc.get("command") or proc.get("comm", ""),
+        "closeOnUnfocus": False,
+        "mode": "process",
+        "detail": detail,
+        "snoozeHours": snooze_hours,
+        "keepDays": keep_days,
+        "policy": policy,
+        "copyText": investigation_prompt(core, proc),
+        "pending": 1,
+        "headline": "",
+    }
     try:
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
-    except OSError as error:
+        value = legacy_prompt(core.BASE_DIR, payload)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         raise RuntimeError(f"process prompt failed: {error}") from error
-    if result.returncode != 0:
-        failure = (result.stderr or result.stdout or f"swift exited {result.returncode}").strip()
-        failure = failure.splitlines()[-1][:500] if failure else f"swift exited {result.returncode}"
-        raise RuntimeError(f"process prompt failed: {failure}")
-    value = result.stdout.strip().upper()
     allowed = {"INVESTIGATE", "KEEP", "SNOOZE", "QUIT"}
     if policy == "graceful-quit":
         allowed.add("GRACEFUL_QUIT")
@@ -276,8 +273,19 @@ def handle_process_action(core: Any, proc: dict[str, Any], action: str, config: 
             core.notify_user("Idle Maintenance", f"Gracefully quit {_base_name(proc)} (PID {proc['pid']}).")
         return outcome
     if action == "INVESTIGATE":
-        core.open_codex_in_terminal(investigation_prompt(core, proc, config), core.process_cwd(proc))
-        return "investigating"
+        opened, terminal_app, prompt_copied = core.open_codex_in_terminal(
+            investigation_prompt(core, proc, config), core.process_cwd(proc)
+        )
+        if opened:
+            core.log(
+                f"Opened Codex investigation for {_base_name(proc)} in {terminal_app}."
+            )
+            return "investigating"
+        message = f"Could not open an investigation tab for {_base_name(proc)}."
+        if prompt_copied:
+            message += " The prompt was copied to the clipboard."
+        core.notify_user("Idle Maintenance", message)
+        return "failed"
     return "unchanged"
 
 

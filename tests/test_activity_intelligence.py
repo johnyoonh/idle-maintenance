@@ -268,6 +268,26 @@ class ActivityIntelligenceTests(unittest.TestCase):
         self.assertEqual(rows[0]["summary"], "codex investigation | project tmp")
         self.assertNotIn("fileproviderd", rows[0]["summary"])
 
+    def test_codex_hook_preserves_launcher_options(self):
+        calls = []
+
+        def launch(prompt, cwd="/", **kwargs):
+            calls.append((prompt, cwd, kwargs))
+            return True, "iTerm", True
+
+        core = SimpleNamespace(open_codex_in_terminal=launch)
+        install_codex_event_hook(core, db_path=self.db)
+        runner = object()
+
+        result = core.open_codex_in_terminal(
+            "synthetic prompt",
+            "/tmp",
+            launch_runner=runner,
+        )
+
+        self.assertEqual(result, (True, "iTerm", True))
+        self.assertIs(calls[0][2]["launch_runner"], runner)
+
     def test_openai_diagnoser_uses_tool_free_structured_nonstored_response(self):
         seen = []
 

@@ -781,7 +781,7 @@ def install_codex_event_hook(core: Any, *, db_path: Path = DB_PATH) -> None:
     if not callable(original) or getattr(original, "_activity_intelligence_wrapped", False):
         return
 
-    def wrapped(prompt_text: str, cwd: str = "/") -> Any:
+    def wrapped(prompt_text: str, cwd: str = "/", *args: Any, **kwargs: Any) -> Any:
         try:
             project = _project_basename(cwd)
             record_external_event(source="codex", kind="investigation",
@@ -789,7 +789,7 @@ def install_codex_event_hook(core: Any, *, db_path: Path = DB_PATH) -> None:
                                   payload={"origin": "idle-maintenance", "project": project}, db_path=db_path)
         except Exception:
             pass
-        return original(prompt_text, cwd)
+        return original(prompt_text, cwd, *args, **kwargs)
 
     wrapped._activity_intelligence_wrapped = True  # type: ignore[attr-defined]
     core.open_codex_in_terminal = wrapped
