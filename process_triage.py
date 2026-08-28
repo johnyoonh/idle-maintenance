@@ -1,7 +1,23 @@
 """Deterministic review thresholds for already-classified macOS processes."""
 from __future__ import annotations
 
+import math
 from typing import Any
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _bounded_number(value: Any, default: float, *, minimum: float = 0.0) -> float:
+    parsed = _finite_float(value)
+    if parsed is None:
+        parsed = default
+    return max(minimum, parsed)
 
 
 def _peak_cpu(proc: dict[str, Any]) -> float:
@@ -10,10 +26,9 @@ def _peak_cpu(proc: dict[str, Any]) -> float:
         values = [proc.get("cpu", 0)]
     parsed = []
     for value in values:
-        try:
-            parsed.append(float(value))
-        except (TypeError, ValueError):
-            continue
+        number = _finite_float(value)
+        if number is not None:
+            parsed.append(number)
     return max(parsed, default=0.0)
 
 
@@ -24,15 +39,11 @@ def _peak_io(proc: dict[str, Any], key: str, fallback_key: str) -> float:
         for value in values:
             if not isinstance(value, dict):
                 continue
-            try:
-                parsed.append(float(value.get(key, 0) or 0))
-            except (TypeError, ValueError):
-                continue
-    try:
-        fallback = float(proc.get(fallback_key, 0) or 0)
-    except (TypeError, ValueError):
-        fallback = 0.0
-    return max(parsed + [fallback], default=0.0)
+            number = _finite_float(value.get(key, 0) or 0)
+            if number is not None:
+                parsed.append(number)
+    fallback = _finite_float(proc.get(fallback_key, 0) or 0)
+    return max(parsed + ([fallback] if fallback is not None else []), default=0.0)
 
 
 def triage_process(
@@ -68,23 +79,43 @@ def triage_process(
             "guidance": guidance,
         }
 
-    try:
-        multiplier = max(1.0, float(cfg.get("process_routine_review_multiplier", 4.0)))
-    except (TypeError, ValueError):
-        multiplier = 4.0
-    cpu_multiplier = max(1.0, float(guidance.get("cpu_review_multiplier", 0) or multiplier))
-    io_multiplier = max(1.0, float(guidance.get("io_review_multiplier", 0) or multiplier))
-    cpu_limit = max(0.0, float(cfg.get("process_high_cpu_threshold", 50.0))) * cpu_multiplier
-    total_limit = max(0.0, float(cfg.get("process_high_io_total_mib_per_second", 20.0))) * io_multiplier
-    write_limit = max(0.0, float(cfg.get("process_high_io_write_mib_per_second", 10.0))) * io_multiplier
+    multiplier = _bounded_number(
+        cfg.get("process_routine_review_multiplier", 4.0),
+        4.0,
+        minimum=1.0,
+    )
+    cpu_multiplier = _bounded_number(
+        guidance.get("cpu_review_multiplier", 0) or multiplier,
+        multiplier,
+        minimum=1.0,
+    )
+    io_multiplier = _bounded_number(
+        guidance.get("io_review_multiplier", 0) or multiplier,
+        multiplier,
+        minimum=1.0,
+    )
+    cpu_limit = _bounded_number(
+        cfg.get("process_high_cpu_threshold", 50.0),
+        50.0,
+    ) * cpu_multiplier
+    total_limit = _bounded_number(
+        cfg.get("process_high_io_total_mib_per_second", 20.0),
+        20.0,
+    ) * io_multiplier
+    write_limit = _bounded_number(
+        cfg.get("process_high_io_write_mib_per_second", 10.0),
+        10.0,
+    ) * io_multiplier
 
     peak_cpu = _peak_cpu(proc)
     measured_total = _peak_io(proc, "total_mib_s", "average_total_mib_s")
     measured_write = _peak_io(proc, "write_mib_s", "average_write_mib_s")
-    if peak_total_mib_s is not None:
-        measured_total = max(measured_total, float(peak_total_mib_s))
-    if peak_write_mib_s is not None:
-        measured_write = max(measured_write, float(peak_write_mib_s))
+    provided_total = _finite_float(peak_total_mib_s)
+    if provided_total is not None:
+        measured_total = max(measured_total, provided_total)
+    provided_write = _finite_float(peak_write_mib_s)
+    if provided_write is not None:
+        measured_write = max(measured_write, provided_write)
 
     exceeded = []
     if cpu_limit and peak_cpu >= cpu_limit:
