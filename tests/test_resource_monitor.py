@@ -319,6 +319,17 @@ class ResourceMonitorTests(unittest.TestCase):
         self.assertEqual(len(self.monitor.state["incidents"]), 1)
         self.assertTrue(self.history.exists())
 
+    def test_prune_discards_recovered_legacy_prompt_ids(self):
+        self.monitor.state["incidents"] = [
+            {"id": "active", "status": "active", "last_seen_at": self.clock},
+            {"id": "recovered", "status": "recovered", "last_seen_at": self.clock},
+        ]
+        self.monitor.state["pending_prompts"] = ["recovered", "active"]
+
+        self.monitor._prune(self.clock)
+
+        self.assertEqual(self.monitor.state["pending_prompts"], ["active"])
+
 
 class ProcessPolicyTests(unittest.TestCase):
     def test_protected_apple_daemons_have_no_destructive_policy(self):

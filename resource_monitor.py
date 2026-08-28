@@ -349,11 +349,16 @@ class ResourceMonitor:
             key=lambda item: float(item.get("last_seen_at", item.get("started_at", 0)) or 0),
         )[-incident_limit:]
         valid_ids = {item.get("id") for item in self.state["incidents"]}
+        active_ids = {
+            item.get("id")
+            for item in self.state["incidents"]
+            if item.get("status", "active") == "active"
+        }
         self.state["active"] = {
             key: value for key, value in self.state["active"].items() if value in valid_ids
         }
         self.state["pending_prompts"] = [
-            value for value in self.state["pending_prompts"] if value in valid_ids
+            value for value in self.state["pending_prompts"] if value in active_ids
         ][-incident_limit:]
         cooldown = max(
             float(self.config.get("resource_monitor_notification_cooldown_seconds", 6 * 3600)),
