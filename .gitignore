@@ -3,15 +3,68 @@ __pycache__/
 .venv/
 *.py[cod]
 *$py.class
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
 
-# MacOS
+# macOS and generated applications
 .DS_Store
+/IdleMaintenance.app/
+/*.dSYM/
+/.build_app_core.overlay.*
+/.idle-maintenance-build.*/
+/.IdleMaintenance.app.backup.*/
 
-# Data & Config (Personal state)
-config.json
-custom_whitelist.json
-stale_queue.json
+# Local task and agent state
+/.beads/
+/.claude/settings.local.json
+/AGENTS.local.md
+/.local-fixtures/
+/.private/
+/tmp-private/
 
-# Temporary
+# Secrets and personal configuration
+/.env
+/.env.*
+!/.env.example
+/.secrets/
+/*.key
+/*.p12
+/*.pem
+/credentials.json
+/credentials.*.json
+/token.json
+/tokens.json
+/config.json
+/custom_whitelist.json
+/stale_queue.json
+
+# Runtime state and incident data
+/activity-intelligence-latest.md
+/app-actions.json
+/app-audit-cache.json
+/app_usage.json
+/cache.json
+/process_queue.json
+/process_whitelist.json
+/resource-monitor-state.json
+/session.json
+/state.json
+/watch-jobs.json
+/*.db
+/*.db-*
+/*.jsonl
+/*.sqlite
+/*.sqlite-*
+/*.sqlite3
+/*.sqlite3-*
+
+# Logs, locks, and temporary files
 /tmp/
 *.log
+*.out
+*.err
+*.lock
+*.pid
