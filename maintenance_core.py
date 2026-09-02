@@ -614,7 +614,17 @@ def create_codex_launch_file(
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write("#!/bin/zsh\n")
             handle.write('rm -f -- "$0"\n')
-            handle.write("exec /bin/zsh -lic " + shlex.quote(codex_command) + "\n")
+            handle.write(
+                "exec /usr/bin/env -u TMUX -u TMUX_PANE "
+                "TMUX_AUTO_ATTACH=0 "
+                "TMUX_DIR_AUTO_ATTACH=0 "
+                "TERMINAL_TMUX_AUTO_ATTACH=0 "
+                "ITERM_TMUX_AUTO_START=0 "
+                "TMUX_DISABLE_AUTO_START=1 "
+                "/bin/zsh -lic "
+                + shlex.quote(codex_command)
+                + "\n"
+            )
         os.chmod(path, 0o700)
     except Exception:
         try:
