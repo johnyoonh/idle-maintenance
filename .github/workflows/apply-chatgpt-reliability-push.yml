@@ -1,0 +1,57 @@
+name: Apply ChatGPT reliability patch on trusted branch
+
+on:
+  push:
+    branches:
+      - chatgpt/reconcile-leave-shortcut-reliability
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/reconcile-leave-shortcut-reliability
+          fetch-depth: 0
+
+      - name: Apply exact-match guarded edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .chatgpt-patch/apply_reliability.py
+          rm -rf .chatgpt-patch
+          rm -f .github/workflows/apply-chatgpt-reliability.yml
+          rm -f .github/workflows/apply-chatgpt-reliability-push.yml
+
+      - name: Validate focused reliability behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python3 -m unittest -v \
+            tests.test_leave_history_reconcile \
+            tests.test_resource_monitor_return_flow \
+            tests.test_idle_watcher_shortcuts \
+            tests.test_post_sync_rebuild \
+            tests.test_process_intelligence
+          python3 -m compileall -q \
+            leave_history_reconcile.py \
+            resource_monitor.py \
+            idle_watcher.py \
+            tests/test_leave_history_reconcile.py \
+            tests/test_resource_monitor_return_flow.py \
+            tests/test_idle_watcher_shortcuts.py \
+            tests/test_post_sync_rebuild.py
+          bash -n scripts/post_sync_rebuild.sh deploy_core.sh
+
+      - name: Commit validated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: reconcile Leave history and preserve return reviews"
+          git push origin HEAD:chatgpt/reconcile-leave-shortcut-reliability
