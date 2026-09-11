@@ -39,6 +39,23 @@ def review_gate_transition(
     return was_idle, review_pending, False
 
 
+def review_cooldown_transition(
+    should_review,
+    *,
+    review_pending,
+    now,
+    last_triggered,
+    cooldown_seconds,
+):
+    """Retain a due review until the post-trigger cooldown expires."""
+    if not should_review:
+        return review_pending, False
+    cooldown = max(0.0, float(cooldown_seconds))
+    if now - last_triggered >= cooldown:
+        return False, True
+    return True, False
+
+
 def _run_return_command(command, *, command_runner):
     try:
         result = command_runner(command, check=False)
@@ -254,10 +271,16 @@ def main():
             )
 
             if should_review:
-                if time.time() - last_triggered >= post_trigger_cooldown_seconds:
+                review_pending, should_trigger = review_cooldown_transition(
+                    should_review,
+                    review_pending=review_pending,
+                    now=time.time(),
+                    last_triggered=last_triggered,
+                    cooldown_seconds=post_trigger_cooldown_seconds,
+                )
+                if should_trigger:
                     trigger_maintenance()
                     last_triggered = time.time()
-                time.sleep(post_trigger_cooldown_seconds)
 
             time.sleep(check_interval_seconds)
     finally:
