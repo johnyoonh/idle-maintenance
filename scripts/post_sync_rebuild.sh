@@ -7,6 +7,8 @@ APP_PATH="$DEST_DIR/IdleMaintenance.app"
 LOG_DIR="${IDLE_MAINTENANCE_LOG_DIR:-$HOME/Library/Logs/idle-maintenance}"
 LOG_FILE="$LOG_DIR/post-sync-build.log"
 LOCK_DIR="${IDLE_MAINTENANCE_POST_SYNC_LOCK:-${TMPDIR:-/tmp}/idle-maintenance-post-sync.lock}"
+BUILD_SCRIPT="${IDLE_MAINTENANCE_BUILD_SCRIPT:-$ROOT/build_app.sh}"
+RECONCILE_SCRIPT="${IDLE_MAINTENANCE_RECONCILE_SCRIPT:-$ROOT/leave_history_reconcile.py}"
 DRY_RUN=0
 
 for arg in "$@"; do
@@ -63,6 +65,8 @@ pgrep_bin="${IDLE_MAINTENANCE_PGREP_BIN:-pgrep}"
 pkill_bin="${IDLE_MAINTENANCE_PKILL_BIN:-pkill}"
 open_bin="${IDLE_MAINTENANCE_OPEN_BIN:-open}"
 sleep_bin="${IDLE_MAINTENANCE_SLEEP_BIN:-sleep}"
+launchctl_bin="${IDLE_MAINTENANCE_LAUNCHCTL_BIN:-launchctl}"
+id_bin="${IDLE_MAINTENANCE_ID_BIN:-/usr/bin/id}"
 restart_attempts="${IDLE_MAINTENANCE_RESTART_ATTEMPTS:-50}"
 restart_sleep_seconds="${IDLE_MAINTENANCE_RESTART_SLEEP_SECONDS:-0.2}"
 was_running=0
@@ -70,13 +74,26 @@ if command -v "$pgrep_bin" >/dev/null 2>&1 && "$pgrep_bin" -x IdleMaintenance >/
   was_running=1
 fi
 
+user_uid="${IDLE_MAINTENANCE_UID:-$($id_bin -u)}"
+monitor_service="gui/$user_uid/com.john.idle-maintenance-monitor"
+monitor_loaded=0
+if command -v "$launchctl_bin" >/dev/null 2>&1 && "$launchctl_bin" print "$monitor_service" >/dev/null 2>&1; then
+  monitor_loaded=1
+fi
+
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "dry-run: CODESIGN_IDENTITY=$identity $ROOT/build_app.sh $DEST_DIR; restart=$was_running"
+  log "dry-run: CODESIGN_IDENTITY=$identity $BUILD_SCRIPT $DEST_DIR; restart=$was_running; monitor_restart=$monitor_loaded"
   exit 0
 fi
 
 log "building IdleMaintenance.app from synced revision ${REPO_SYNC_NEW_HEAD:-unknown}"
-CODESIGN_IDENTITY="$identity" "$ROOT/build_app.sh" "$DEST_DIR" >>"$LOG_FILE" 2>&1
+CODESIGN_IDENTITY="$identity" "$BUILD_SCRIPT" "$DEST_DIR" >>"$LOG_FILE" 2>&1
+
+reconcile_failed=0
+if ! /usr/bin/python3 "$RECONCILE_SCRIPT" >>"$LOG_FILE" 2>&1; then
+  reconcile_failed=1
+  log "process Leave history reconciliation failed; existing whitelist was left untouched"
+fi
 
 if [[ "$was_running" == "1" ]]; then
   log "restarting the existing menu-bar process with the rebuilt app"
@@ -92,6 +109,18 @@ if [[ "$was_running" == "1" ]]; then
     exit 75
   fi
   "$open_bin" -g "$APP_PATH"
+fi
+
+if [[ "$monitor_loaded" == "1" ]]; then
+  log "restarting the loaded resource monitor so synced code takes effect"
+  if ! "$launchctl_bin" kickstart -k "$monitor_service" >>"$LOG_FILE" 2>&1; then
+    log "resource monitor restart failed for $monitor_service"
+    exit 76
+  fi
+fi
+
+if [[ "$reconcile_failed" == "1" ]]; then
+  exit 77
 fi
 
 log "post-sync rebuild completed"
