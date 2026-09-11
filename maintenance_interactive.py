@@ -261,7 +261,7 @@ def _finish_shortcut_review() -> None:
         return
     if os.environ.get("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW") == "1":
         return
-    result = run_shortcut_review(load_config(_core.BASE_DIR))
+    result = run_shortcut_review(load_config(_core.BASE_DIR), automatic=True)
     if not result.get("ok"):
         print(render_result(result), file=sys.stderr)
 

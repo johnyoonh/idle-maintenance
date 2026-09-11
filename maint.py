@@ -184,7 +184,8 @@ Commands:
   later [script-id]     Defer it for its normal frequency
   enable <script-id>    Re-enable a dismissed suggestion
   status [--json]       Show scheduled and interactive maintenance status
-  shortcuts [--json]    Refresh shortcut content, then open the review popup
+  shortcuts [--provider keyboard|apple] [--json]
+                        Open the selected provider, or the least-recently shown one
 
 If script-id is omitted, the current terminal suggestion is used.
 Legacy 'maint <script-id> <1-4>' forms remain temporarily supported.""")
@@ -208,8 +209,18 @@ def parse_args(argv):
     return "show", argv[0], False, False
 
 
+def parse_shortcut_provider(argv):
+    if "--provider" not in argv:
+        return None
+    index = argv.index("--provider")
+    if index + 1 >= len(argv) or argv[index + 1] not in {"keyboard", "apple"}:
+        raise ValueError("--provider requires keyboard or apple")
+    return argv[index + 1]
+
+
 def main(argv=None):
-    command, script_id, include_all, as_json = parse_args(list(sys.argv[1:] if argv is None else argv))
+    args = list(sys.argv[1:] if argv is None else argv)
+    command, script_id, include_all, as_json = parse_args(args)
     if command == "help":
         print_help()
         return 0
@@ -222,7 +233,12 @@ def main(argv=None):
     if command == "shortcuts":
         from shortcut_review import render_result, run_shortcut_review
 
-        result = run_shortcut_review()
+        try:
+            provider = parse_shortcut_provider(args)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        result = run_shortcut_review(provider=provider)
         print(json.dumps(result, indent=2, sort_keys=True) if as_json else render_result(result))
         return 0 if result.get("ok") else 1
     if command == "enable":

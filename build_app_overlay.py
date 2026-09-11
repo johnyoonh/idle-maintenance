@@ -63,7 +63,16 @@ NEW_MENU = '''        func addAction(_ title: String, symbolName: String, action
             ]
         )
         menu.addItem(shortcutHeader)
-        addAction("Refresh & Review Shortcuts", symbolName: "keyboard.badge.ellipsis", action: #selector(reviewKeyboardShortcuts), key: "k")
+        let shortcutReviewItem = NSMenuItem(title: "Review Shortcuts", action: nil, keyEquivalent: "")
+        if let symbol = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: "Review Shortcuts") {
+            symbol.isTemplate = true
+            shortcutReviewItem.image = symbol
+        }
+        let shortcutReviewMenu = NSMenu(title: "Review Shortcuts")
+        shortcutReviewMenu.addItem(withTitle: "Keyboard Shortcuts…", action: #selector(reviewKeyboardShortcuts), keyEquivalent: "k")
+        shortcutReviewMenu.addItem(withTitle: "Apple Shortcuts…", action: #selector(reviewAppleShortcuts), keyEquivalent: "a")
+        shortcutReviewItem.submenu = shortcutReviewMenu
+        menu.addItem(shortcutReviewItem)
         addAction("Run Next Maintenance Prompt", symbolName: "sparkles", action: #selector(runMaintenanceReview), key: "m")
         menu.addItem(NSMenuItem.separator())
         addAction("Start / Restart Away-Return Review", symbolName: "figure.walk.arrival", action: #selector(restartWatcher), key: "r")
@@ -84,7 +93,21 @@ NEW_SHORTCUT_ACTION = '''    @objc func reviewKeyboardShortcuts() {
             executable: "/usr/bin/python3",
             arguments: [
                 maintenanceDir.appendingPathComponent("maint.py").path,
-                "shortcuts"
+                "shortcuts",
+                "--provider",
+                "keyboard"
+            ]
+        )
+    }
+
+    @objc func reviewAppleShortcuts() {
+        runDetached(
+            executable: "/usr/bin/python3",
+            arguments: [
+                maintenanceDir.appendingPathComponent("maint.py").path,
+                "shortcuts",
+                "--provider",
+                "apple"
             ]
         )
     }'''

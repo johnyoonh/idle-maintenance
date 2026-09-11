@@ -15,13 +15,17 @@ A queued process window is skipped if the process exits or its identity changes 
 
 ## Refresh and review shortcuts
 
-Use one canonical command:
+Use the canonical next-due command:
 
 ```bash
 maint shortcuts
 ```
 
-It runs the configured focused-content export first and opens the GUI review popup only when that refresh succeeds. This prevents a global hotkey or menu action from showing stale review content.
+It selects the provider whose last successful display is oldest, refreshes its
+content, and opens the review only when that refresh succeeds. The keyboard
+provider remains the first choice on a fresh installation. An Apple provider
+with no candidates is skipped. If a next-due provider fails, the other provider
+is tried, and only a successful display updates rotation state.
 
 Default command sequence:
 
@@ -30,7 +34,14 @@ $HOME/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused
 $HOME/.local/bin/kb popup --surface gui --group auto --force
 ```
 
-The menu item **Refresh & Review Shortcuts** and the global Hammerspoon binding both call `maint shortcuts` instead of duplicating this sequence.
+Use `maint shortcuts --provider keyboard` or `maint shortcuts --provider apple`
+to bypass rotation and open a particular provider. The menu-bar app exposes the
+same choices under **Review Shortcuts**. The existing global Hammerspoon binding
+continues to call next-due `maint shortcuts`.
+
+The Apple provider runs the local `Shortcut Review` workflow. It presents
+advisory **Use Soon** and **Consider Removing** lists and records a UUID-keyed
+decision; it never deletes an Apple Shortcut.
 
 ## Automatic away-return review
 
@@ -56,7 +67,10 @@ The Hammerspoon coordinator asks wiki-automation for the highest-ranked TaskForg
 
 Examples include a tuition URL, a direct subscription-email or draft link, a Canvas course page, or a saved interview-preparation conversation. Public docs and tests use synthetic domains and profile names; real targets remain in the private vault.
 
-`maint shortcuts` remains the manual refresh-and-review workflow. The automatic return path does not open that separate popup, so it cannot steal focus from the selected work target.
+After an interactive app/process maintenance review, Idle Maintenance opens at
+most one shortcut provider per local day. The resident contextual handoff alone
+does not open a shortcut review, so it cannot steal focus from the selected work
+target.
 
 ## Legacy watcher
 

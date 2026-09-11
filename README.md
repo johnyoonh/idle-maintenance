@@ -233,8 +233,11 @@ After interactive reviews, the watcher invokes the configured context router
 (`open hammerspoon://resumerouter` by default). Hammerspoon delegates task
 ranking to TaskForge/wiki-automation, browser ranking to TabMoa, and note
 selection to Obsidian-aware handlers. If the router cannot launch, the existing
-`handoff_url` or `handoff_app` remains the fallback. Automatic returns do not
-open the shortcut-review popup; use `maint shortcuts` for that manual review.
+`handoff_url` or `handoff_app` remains the fallback. After an interactive
+app/process review, the least-recently successful shortcut-review provider may
+open once per local day. Use `maint shortcuts --provider keyboard` or
+`maint shortcuts --provider apple` to open either provider directly; the menu
+offers the same two choices under **Review Shortcuts**.
 
 The legacy watcher reads configuration from the first available file in this order:
 

@@ -86,6 +86,10 @@ DEFAULT_CONFIG = {
     "return_from_away_minutes": 15,
     "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",
     "return_flashcard_refresh_command": f"{LOCAL_BIN_DIR}/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
+    "apple_shortcut_review_refresh_command": [
+        "node", "~/repos/apple-shortcuts/scripts/shortcut-review.mjs", "refresh", "--json",
+    ],
+    "apple_shortcut_review_popup_command": ["shortcuts", "run", "Shortcut Review"],
     "return_focus_command": ["open", "hammerspoon://resumerouter"],
     "return_handoff_command": [],
     "storage_cleanup": {
