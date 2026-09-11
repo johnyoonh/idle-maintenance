@@ -655,7 +655,6 @@ class ResourceMonitor:
         ):
             return
 
-        self.state["return_pending"] = False
         cooldown = max(
             0.0,
             float(self.config.get("post_trigger_cooldown_seconds", 3600)),
@@ -664,6 +663,7 @@ class ResourceMonitor:
         if last_triggered and now - last_triggered < cooldown:
             return
 
+        self.state["return_pending"] = False
         self.state["last_return_flow_at"] = now
         try:
             result = self.return_fn()

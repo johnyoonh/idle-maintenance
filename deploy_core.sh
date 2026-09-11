@@ -13,6 +13,7 @@ cp activity_intelligence.py "$DEST/"
 cp app_actions.py "$DEST/"
 cp idle_config.py "$DEST/"
 cp idle_watcher.py "$DEST/"
+cp leave_history_reconcile.py "$DEST/"
 cp maint.py "$DEST/"
 cp maintenance_core.py "$DEST/"
 cp maintenance_interactive.py "$DEST/"
@@ -51,5 +52,12 @@ cp -n stale_queue.json "$DEST/" 2>/dev/null || true
 
 chmod +x "$DEST"/*.py
 chmod +x "$DEST"/*.swift
+
+# Recover Leave backoff from history after upgrading older deployments. The
+# reconciliation is idempotent and fails closed rather than replacing malformed
+# state, so a deployment can surface the error without losing user decisions.
+if ! /usr/bin/python3 "$DEST/leave_history_reconcile.py"; then
+  echo "Warning: process Leave history reconciliation failed; existing whitelist was left untouched." >&2
+fi
 
 echo "✓ Deployment complete."
