@@ -144,19 +144,24 @@ class ReturnFlowTests(unittest.TestCase):
         self.assertEqual(self.events, ["prompt", "prompt"])
         self.assertEqual(self.monitor.state["pending_prompts"], [])
 
-    def test_cooldown_requires_another_away_return_cycle(self):
+    def test_cooldown_keeps_return_pending_until_it_expires(self):
         self.observe(idle=601, now=3000)
         self.observe(idle=0, now=3010)
         self.observe(idle=30, now=3040)
         self.observe(idle=601, now=3500)
         self.observe(idle=0, now=3510)
         self.observe(idle=30, now=3540)
-        self.assertEqual(self.events, ["return"])
 
-        self.observe(idle=601, now=7000)
-        self.observe(idle=0, now=7010)
-        self.observe(idle=30, now=7040)
+        self.assertEqual(self.events, ["return"])
+        self.assertTrue(self.monitor.state["return_pending"])
+
+        self.observe(idle=30, now=6639)
+        self.assertEqual(self.events, ["return"])
+        self.assertTrue(self.monitor.state["return_pending"])
+
+        self.observe(idle=30, now=6640)
         self.assertEqual(self.events, ["return", "return"])
+        self.assertFalse(self.monitor.state["return_pending"])
 
     def test_return_failure_is_recorded_without_raising(self):
         def fail():
