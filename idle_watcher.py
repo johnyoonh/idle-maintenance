@@ -46,7 +46,7 @@ def trigger_maintenance(
     """Finish interactive reviews, then delegate focus to the resume router."""
     interactive_script = os.path.join(BASE_DIR, "maintenance_interactive.py")
     child_env = os.environ.copy()
-    child_env["IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW"] = "1"
+    child_env.pop("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW", None)
     command_runner(["/usr/bin/python3", interactive_script], check=False, env=child_env)
 
     config = load_config(BASE_DIR)

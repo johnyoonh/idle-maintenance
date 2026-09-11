@@ -7,7 +7,7 @@ import json
 import os
 import shlex
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -83,6 +83,91 @@ def _last_shown(state: dict[str, Any], provider: str) -> str:
     return str(state.get("providers", {}).get(provider, {}).get("lastShownAt", ""))
 
 
+def _local_datetime(value: Any) -> datetime | None:
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed.astimezone()
+
+
+def _review_history(
+    state: dict[str, Any],
+    timestamp: datetime,
+) -> tuple[list[datetime], bool]:
+    """Load recent successful displays and migrate the former daily marker."""
+    changed = False
+    history: list[datetime] = []
+    raw_history = state.get("reviewHistory", [])
+    if isinstance(raw_history, list):
+        for value in raw_history:
+            parsed = _local_datetime(value)
+            if parsed is not None:
+                history.append(parsed)
+
+    legacy_day = state.pop("lastAutomaticReviewDate", None)
+    if legacy_day:
+        changed = True
+        legacy_timestamp = None
+        for provider in PROVIDERS:
+            candidate = _local_datetime(_last_shown(state, provider))
+            if candidate is not None and candidate.date().isoformat() == str(legacy_day):
+                if legacy_timestamp is None or candidate > legacy_timestamp:
+                    legacy_timestamp = candidate
+        if legacy_timestamp is None:
+            try:
+                legacy_date = datetime.fromisoformat(str(legacy_day)).date()
+                legacy_timestamp = (
+                    timestamp
+                    if legacy_date == timestamp.date()
+                    else datetime.combine(legacy_date, datetime.min.time(), timestamp.tzinfo)
+                )
+            except ValueError:
+                legacy_timestamp = None
+        if legacy_timestamp is not None:
+            history.append(legacy_timestamp)
+
+    cutoff = timestamp - timedelta(days=14)
+    recent = sorted({item.isoformat(): item for item in history if item >= cutoff}.values())
+    serialized = [item.isoformat() for item in recent]
+    if serialized != raw_history:
+        state["reviewHistory"] = serialized
+        changed = True
+    return recent, changed
+
+
+def _automatic_gate(
+    config: dict[str, Any],
+    history: list[datetime],
+    timestamp: datetime,
+) -> dict[str, Any] | None:
+    daily_limit_key = (
+        "shortcut_review_weekend_limit"
+        if timestamp.weekday() >= 5
+        else "shortcut_review_weekday_limit"
+    )
+    daily_limit = max(0, int(config.get(daily_limit_key, 3 if timestamp.weekday() >= 5 else 2)))
+    daily_count = sum(item.date() == timestamp.date() for item in history)
+    if daily_count >= daily_limit:
+        return {
+            "reason": "daily-limit",
+            "dailyCount": daily_count,
+            "dailyLimit": daily_limit,
+        }
+
+    cooldown_hours = max(0.0, float(config.get("shortcut_review_cooldown_hours", 6)))
+    if history and cooldown_hours:
+        next_eligible = max(history) + timedelta(hours=cooldown_hours)
+        if timestamp < next_eligible:
+            return {
+                "reason": "cooldown",
+                "dailyCount": daily_count,
+                "dailyLimit": daily_limit,
+                "nextEligibleAt": next_eligible.isoformat(),
+            }
+    return None
+
+
 def _run_provider(
     provider: str,
     config: dict[str, Any],
@@ -139,12 +224,25 @@ def run_shortcut_review(
         return {"ok": False, "provider": provider, "failed_step": "provider", "error": f"Unknown shortcut review provider: {provider}", "steps": []}
 
     root = Path(home or Path.home())
-    timestamp = now or datetime.now().astimezone()
+    timestamp = _local_datetime(now or datetime.now().astimezone())
+    assert timestamp is not None
     path = Path(state_path or config.get("shortcut_review_state_path") or _default_state_path(root))
     state = _load_state(path)
-    today = timestamp.astimezone().date().isoformat()
-    if automatic and state.get("lastAutomaticReviewDate") == today:
-        return {"ok": True, "provider": None, "skipped": True, "reason": "already-reviewed-today", "failed_step": None, "error": "", "steps": []}
+    history, state_changed = _review_history(state, timestamp)
+    if automatic:
+        gate = _automatic_gate(config, history, timestamp)
+        if gate:
+            if state_changed:
+                _save_state(path, state)
+            return {
+                "ok": True,
+                "provider": None,
+                "skipped": True,
+                "failed_step": None,
+                "error": "",
+                "steps": [],
+                **gate,
+            }
 
     explicit = provider is not None
     order = [provider] if explicit else sorted(PROVIDERS, key=lambda name: (_last_shown(state, name), PROVIDERS.index(name)))
@@ -154,8 +252,8 @@ def run_shortcut_review(
         attempts.append(result)
         if result.get("ok") and not result.get("skipped"):
             state.setdefault("providers", {}).setdefault(candidate, {})["lastShownAt"] = timestamp.isoformat()
-            if automatic:
-                state["lastAutomaticReviewDate"] = today
+            history.append(timestamp)
+            state["reviewHistory"] = [item.isoformat() for item in sorted(history)]
             _save_state(path, state)
             result["attempts"] = attempts
             return result
@@ -171,8 +269,10 @@ def run_shortcut_review(
 
 def render_result(result: dict[str, Any]) -> str:
     if result.get("skipped"):
-        if result.get("reason") == "already-reviewed-today":
-            return "Shortcut review already opened today."
+        if result.get("reason") == "daily-limit":
+            return "Shortcut review daily limit reached."
+        if result.get("reason") == "cooldown":
+            return f"Shortcut review is cooling down until {result.get('nextEligibleAt')}."
         return "No Apple Shortcut candidates were due for review."
     if result.get("ok"):
         return f"{str(result.get('provider', 'shortcut')).title()} shortcut review opened."

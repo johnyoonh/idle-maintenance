@@ -235,7 +235,9 @@ ranking to TaskForge/wiki-automation, browser ranking to TabMoa, and note
 selection to Obsidian-aware handlers. If the router cannot launch, the existing
 `handoff_url` or `handoff_app` remains the fallback. After an interactive
 app/process review, the least-recently successful shortcut-review provider may
-open once per local day. Use `maint shortcuts --provider keyboard` or
+open after a six-hour cooldown, up to twice per weekday or three times per
+weekend day. Successful manual reviews also restart the cooldown, while manual
+menu choices remain available at any time. Use `maint shortcuts --provider keyboard` or
 `maint shortcuts --provider apple` to open either provider directly; the menu
 offers the same two choices under **Review Shortcuts**.
 

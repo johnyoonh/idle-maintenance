@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import maint
 from shortcut_review import normalize_command, run_shortcut_review
@@ -99,7 +100,7 @@ class ShortcutReviewTests(unittest.TestCase):
             self.assertEqual(result["provider"], "apple")
             self.assertEqual(calls, [["apple-refresh"], ["apple-popup"]])
 
-    def test_automatic_review_runs_once_per_local_day(self):
+    def test_automatic_review_uses_six_hour_cooldown_and_weekday_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state.json"
             calls = []
@@ -114,12 +115,167 @@ class ShortcutReviewTests(unittest.TestCase):
                 "apple_shortcut_review_refresh_command": ["apple-refresh"],
                 "apple_shortcut_review_popup_command": ["apple-popup"],
             }
-            now = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
-            first = run_shortcut_review(config, automatic=True, runner=runner, state_path=state, now=now)
-            second = run_shortcut_review(config, automatic=True, runner=runner, state_path=state, now=now)
+            first = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 8, tzinfo=timezone.utc),
+            )
+            cooldown = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 13, 59, tzinfo=timezone.utc),
+            )
+            second = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 14, tzinfo=timezone.utc),
+            )
+            capped = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 20, tzinfo=timezone.utc),
+            )
             self.assertTrue(first["ok"])
-            self.assertEqual(second["reason"], "already-reviewed-today")
-            self.assertEqual(calls, [["keyboard-refresh"], ["keyboard-popup"]])
+            self.assertEqual(cooldown["reason"], "cooldown")
+            self.assertTrue(second["ok"])
+            self.assertEqual(capped["reason"], "daily-limit")
+            self.assertEqual(capped["dailyLimit"], 2)
+            self.assertEqual(sum(command[0].endswith("popup") for command in calls), 2)
+
+    def test_weekend_allows_three_automatic_reviews(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            config = {
+                "return_flashcard_refresh_command": ["keyboard-refresh"],
+                "return_shortcut_popup_command": ["keyboard-popup"],
+            }
+            local_zone = ZoneInfo("America/Chicago")
+            results = [
+                run_shortcut_review(
+                    config,
+                    automatic=True,
+                    runner=runner,
+                    state_path=state,
+                    now=datetime(2026, 9, 12, hour, tzinfo=local_zone),
+                )
+                for hour in (1, 7, 13, 19)
+            ]
+
+            self.assertTrue(all(result["ok"] for result in results))
+            self.assertEqual(results[-1]["reason"], "daily-limit")
+            self.assertEqual(results[-1]["dailyLimit"], 3)
+            self.assertEqual(len(calls), 6)
+
+    def test_successful_manual_review_restarts_automatic_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            config = {
+                "return_flashcard_refresh_command": ["keyboard-refresh"],
+                "return_shortcut_popup_command": ["keyboard-popup"],
+            }
+            manual = run_shortcut_review(
+                config,
+                provider="keyboard",
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc),
+            )
+            automatic = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 13, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(manual["ok"])
+            self.assertEqual(automatic["reason"], "cooldown")
+            self.assertEqual(len(calls), 2)
+
+    def test_failed_review_does_not_consume_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            fail = True
+
+            def runner(command, **_kwargs):
+                return subprocess.CompletedProcess(
+                    command,
+                    4 if fail else 0,
+                    stdout="",
+                    stderr="failed" if fail else "",
+                )
+
+            config = {
+                "return_flashcard_refresh_command": ["keyboard-refresh"],
+                "return_shortcut_popup_command": ["keyboard-popup"],
+            }
+            first = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc),
+            )
+            fail = False
+            second = run_shortcut_review(
+                config,
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc),
+            )
+
+            self.assertFalse(first["ok"])
+            self.assertTrue(second["ok"])
+            saved = json.loads(state.read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["reviewHistory"]), 1)
+
+    def test_legacy_daily_marker_migrates_without_an_extra_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "lastAutomaticReviewDate": "2026-09-10",
+                        "providers": {
+                            "keyboard": {"lastShownAt": "2026-09-10T12:00:00+00:00"}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = run_shortcut_review(
+                {},
+                automatic=True,
+                runner=lambda *_args, **_kwargs: self.fail("provider should not run"),
+                state_path=state,
+                now=datetime(2026, 9, 10, 13, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(result["reason"], "cooldown")
+            saved = json.loads(state.read_text(encoding="utf-8"))
+            self.assertNotIn("lastAutomaticReviewDate", saved)
+            self.assertEqual(len(saved["reviewHistory"]), 1)
 
     def test_empty_apple_provider_falls_back_without_opening_it(self):
         with tempfile.TemporaryDirectory() as directory:

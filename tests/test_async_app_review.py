@@ -113,8 +113,19 @@ class AsyncAppReviewTests(unittest.TestCase):
         runner.assert_called_once_with(["open", "/Applications/Demo.app"], check=False)
 
     def test_process_review_entrypoint_is_not_replaced(self):
-        source = Path(maintenance.__file__).read_text(encoding="utf-8")
-        self.assertIn('if len(sys.argv) > 1 and sys.argv[1] == "--process-audit":\n            _result = _core.main()', source)
+        events = []
+        with (
+            patch.object(maintenance._core, "main", side_effect=lambda: events.append("process") or 7),
+            patch.object(maintenance, "_run_app_review") as app_review,
+            patch.object(maintenance, "close_review_session", side_effect=lambda *_: events.append("close")),
+            patch.object(maintenance, "_finish_shortcut_review") as shortcut_review,
+            patch.object(maintenance, "_start_activity_intelligence", side_effect=lambda: events.append("activity")),
+        ):
+            self.assertEqual(maintenance.main(["--process-audit"]), 7)
+
+        app_review.assert_not_called()
+        shortcut_review.assert_not_called()
+        self.assertEqual(events, ["process", "close", "activity"])
 
     def test_app_audit_snapshot_is_reused_and_finishes_before_first_prompt(self):
         events = []

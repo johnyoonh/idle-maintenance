@@ -52,10 +52,7 @@ class IdleWatcherShortcutTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(events[0][1][-1].endswith("maintenance_interactive.py"))
-        self.assertEqual(
-            events[0][2]["env"]["IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW"],
-            "1",
-        )
+        self.assertNotIn("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW", events[0][2]["env"])
         self.assertEqual(events[1][1], ["open", "hammerspoon://resumerouter"])
         self.assertFalse(result["fallback"])
 

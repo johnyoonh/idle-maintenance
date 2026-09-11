@@ -119,12 +119,12 @@ def _handle_app_action(
     return current_queue, True, 1
 
 
-def _run_app_review() -> Any:
+def _run_app_review() -> bool:
     """Run the app review stage while destructive work continues in a detached worker."""
     with _interactive_lock() as acquired:
         if not acquired:
             _core.log("Already running (interactive lock active). Exiting.")
-            return None
+            return False
 
         config = load_config(_core.BASE_DIR)
         # Resume previously queued work on every interactive launch. A singleton worker
@@ -162,7 +162,7 @@ def _run_app_review() -> Any:
             planned_app_output=stale_output,
         )
         if not process_ok:
-            return None
+            return False
         remaining_prompts = max(0, max_entries - process_prompts)
 
         stale_apps: list[str] = []
@@ -241,7 +241,7 @@ def _run_app_review() -> Any:
 
                 if action == "QUIT":
                     _persist_app_state(current_queue, whitelist)
-                    return None
+                    return True
 
                 current_queue, app_done, delta = _handle_app_action(
                     action,
@@ -253,7 +253,7 @@ def _run_app_review() -> Any:
                 processed += delta
 
         _persist_app_state(current_queue, whitelist)
-    return None
+    return True
 
 
 def _finish_shortcut_review() -> None:
@@ -261,7 +261,10 @@ def _finish_shortcut_review() -> None:
         return
     if os.environ.get("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW") == "1":
         return
-    result = run_shortcut_review(load_config(_core.BASE_DIR), automatic=True)
+    config = load_config(_core.BASE_DIR)
+    if not config.get("show_shortcuts_on_finish", True):
+        return
+    result = run_shortcut_review(config, automatic=True)
     if not result.get("ok"):
         print(render_result(result), file=sys.stderr)
 
@@ -273,14 +276,22 @@ def _start_activity_intelligence() -> None:
         _core.log("Activity intelligence cycle was not launched (disabled or unavailable).")
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> Any:
+    args = list(sys.argv[1:] if argv is None else argv)
+    _should_review_shortcuts = False
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == "--process-audit":
+        if args and args[0] == "--process-audit":
             _result = _core.main()
         else:
-            _result = _run_app_review()
+            _should_review_shortcuts = _run_app_review()
+            _result = None
     finally:
         close_review_session(_core.BASE_DIR)
-    _finish_shortcut_review()
+    if _should_review_shortcuts:
+        _finish_shortcut_review()
     _start_activity_intelligence()
-    raise SystemExit(_result)
+    return _result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

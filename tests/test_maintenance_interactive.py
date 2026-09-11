@@ -41,6 +41,39 @@ def process(
 
 
 class MaintenanceInteractiveTests(unittest.TestCase):
+    def test_main_runs_shortcut_review_after_completed_app_review(self):
+        events = []
+        with (
+            patch.object(maintenance, "_run_app_review", side_effect=lambda: events.append("apps") or True),
+            patch.object(maintenance, "close_review_session", side_effect=lambda *_: events.append("close")),
+            patch.object(maintenance, "_finish_shortcut_review", side_effect=lambda: events.append("shortcuts")),
+            patch.object(maintenance, "_start_activity_intelligence", side_effect=lambda: events.append("activity")),
+        ):
+            self.assertIsNone(maintenance.main([]))
+
+        self.assertEqual(events, ["apps", "close", "shortcuts", "activity"])
+
+    def test_main_does_not_run_shortcut_review_when_app_stage_cannot_run(self):
+        events = []
+        with (
+            patch.object(maintenance, "_run_app_review", return_value=False),
+            patch.object(maintenance, "close_review_session", side_effect=lambda *_: events.append("close")),
+            patch.object(maintenance, "_finish_shortcut_review", side_effect=lambda: events.append("shortcuts")),
+            patch.object(maintenance, "_start_activity_intelligence", side_effect=lambda: events.append("activity")),
+        ):
+            self.assertIsNone(maintenance.main([]))
+
+        self.assertEqual(events, ["close", "activity"])
+
+    def test_finish_shortcut_review_honors_disabled_config(self):
+        with (
+            patch.object(maintenance, "load_config", return_value={"show_shortcuts_on_finish": False}),
+            patch.object(maintenance, "run_shortcut_review") as review,
+        ):
+            maintenance._finish_shortcut_review()
+
+        review.assert_not_called()
+
     def test_queue_snooze_uses_configured_window(self):
         item = {"last_prompted": 1_000}
         self.assertTrue(maintenance.queue_item_is_snoozed(item, 24, now=1_000 + 86_399))
