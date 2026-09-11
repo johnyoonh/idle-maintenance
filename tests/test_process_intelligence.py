@@ -9,7 +9,10 @@ import process_identity as identity
 from process_review import (
     investigation_prompt,
     known_process_guidance,
+    next_process_keep_delay_days,
     process_action_policy,
+    process_keep_is_active,
+    record_process_keep,
     should_suppress_process_alert,
 )
 from process_sampling import get_candidate_processes
@@ -123,6 +126,32 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
         self.assertIn("Default handling", prompt)
         self.assertIn("Deterministic triage: review", prompt)
         self.assertIn("recurred within the review window", prompt)
+
+    def test_leave_uses_executable_family_when_command_arguments_change(self):
+        config = {
+            "process_keep_days_limit": 1,
+            "process_keep_backoff_multiplier": 2,
+            "process_keep_backoff_max_days": 60,
+        }
+        first = proc(
+            command="Cursor --type=renderer --field-trial-handle=one",
+            comm="Cursor",
+        )
+        second = proc(
+            command="Cursor --type=renderer --field-trial-handle=two",
+            comm="Cursor",
+        )
+        whitelist = {}
+
+        record_process_keep(
+            whitelist,
+            first,
+            lambda state, key: state.update({key: {"kept_at": 1_000, "keep_count": 1}}),
+        )
+
+        self.assertNotEqual(first["process_key"], second["process_key"])
+        self.assertTrue(process_keep_is_active(config, whitelist, second, now=1_000))
+        self.assertEqual(next_process_keep_delay_days(config, whitelist, second), 2)
 
     def test_google_drive_sync_is_quiet_until_cpu_is_extreme(self):
         drive = proc(

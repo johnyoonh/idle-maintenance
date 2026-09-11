@@ -127,6 +127,19 @@ class AsyncAppReviewTests(unittest.TestCase):
         shortcut_review.assert_not_called()
         self.assertEqual(events, ["process", "close", "activity"])
 
+    def test_closing_process_review_still_allows_post_review_shortcuts(self):
+        audit = Mock(returncode=0, stdout="")
+        config = {"max_prompts": 1, "max_entries_per_idle_return": 1}
+        with (
+            patch.object(maintenance, "_interactive_lock", return_value=contextlib.nullcontext(True)),
+            patch.object(maintenance, "load_config", return_value=config),
+            patch.object(maintenance.subprocess, "run", return_value=audit),
+            patch.object(maintenance._app_actions, "launch_worker", return_value=True),
+            patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
+            patch.object(maintenance._core, "run_process_audit", return_value=(False, 0)),
+        ):
+            self.assertTrue(maintenance._run_app_review())
+
     def test_app_audit_snapshot_is_reused_and_finishes_before_first_prompt(self):
         events = []
         audit = Mock()

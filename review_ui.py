@@ -7,7 +7,8 @@ import subprocess
 import time
 from typing import Any
 
-from idle_config import keep_entry_is_active, next_keep_delay_days
+from idle_config import keep_entry_is_active
+from process_review import next_process_keep_delay_days, process_keep_is_active, record_process_keep
 from prompt_session import ask_review
 
 
@@ -255,9 +256,7 @@ def run_process_audit(
     existing = {x["process_key"] for x in queue}
     for proc in candidates:
         key = proc["process_key"]
-        kept = keep_entry_is_active(config, whitelist.get(key), "process_") or keep_entry_is_active(
-            config, whitelist.get(proc.get("comm")), "process_"
-        )
+        kept = process_keep_is_active(config, whitelist, proc)
         if key not in existing and not kept:
             queue.append({"process_key": key, "last_prompted": 0})
     queue.sort(key=lambda x: x.get("last_prompted", 0))
@@ -286,7 +285,7 @@ def run_process_audit(
         proc = by_key.get(item["process_key"])
         if not proc or core.queue_item_is_snoozed(item, snooze):
             continue
-        keep_days = next_keep_delay_days(config, whitelist.get(item["process_key"]), "process_")
+        keep_days = next_process_keep_delay_days(config, whitelist, proc)
         action = prompt_process(
             core,
             pr,
@@ -301,7 +300,7 @@ def run_process_audit(
             core.save_json(core.PROCESS_WHITELIST_PATH, whitelist)
             return False, done
         if action == "KEEP":
-            core.record_keep(whitelist, item["process_key"])
+            record_process_keep(whitelist, proc, core.record_keep)
             current = [x for x in current if x["process_key"] != item["process_key"]]
         else:
             pr.handle_process_action(core, proc, action, config)

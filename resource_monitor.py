@@ -23,6 +23,7 @@ STATE_SCHEMA = 1
 DEFAULT_STATE_PATH = Path(APP_SUPPORT_DIR) / "resource-monitor-state.json"
 DEFAULT_HISTORY_PATH = Path(APP_SUPPORT_DIR) / "resource-monitor-history.jsonl"
 DEFAULT_LOCK_PATH = Path(APP_SUPPORT_DIR) / "resource-monitor.lock"
+DEFAULT_PROCESS_WHITELIST_PATH = Path(APP_SUPPORT_DIR) / "process_whitelist.json"
 ATTRIBUTION_NOTE = (
     "I/O charged to this process during the sampled window; "
     "this is not definitive physical-disk attribution."
@@ -180,6 +181,12 @@ class ResourceMonitor:
         self.config = config or load_config(os.path.dirname(__file__))
         self.state_path = Path(state_path)
         self.history_path = Path(history_path)
+        configured_whitelist = self.config.get("process_whitelist_path")
+        self.process_whitelist_path = Path(
+            os.path.expanduser(str(configured_whitelist))
+            if configured_whitelist
+            else self.state_path.parent / DEFAULT_PROCESS_WHITELIST_PATH.name
+        )
         self.now_fn = now_fn
         self.notify_fn = notify_fn or self._notify_default
         self.prompt_fn = prompt_fn or self._prompt_default
@@ -215,6 +222,15 @@ class ResourceMonitor:
 
         notify_user(title, message, click_path=self.history_path)
 
+    def _load_process_whitelist(self) -> dict[str, Any]:
+        from maintenance_core import load_custom_whitelist
+
+        return load_custom_whitelist(str(self.process_whitelist_path))
+
+    def _save_process_whitelist(self, whitelist: dict[str, Any]) -> None:
+        if not atomic_write_json(self.process_whitelist_path, whitelist):
+            raise OSError(f"failed to save process whitelist: {self.process_whitelist_path}")
+
     def _prompt_default(self, proc: dict[str, Any], incident: dict[str, Any]) -> str:
         import maintenance_interactive as core
         from activity_intelligence import (
@@ -222,7 +238,12 @@ class ResourceMonitor:
             investigation_suggestion,
             status as intelligence_status,
         )
-        from process_review import handle_process_action, prompt_process
+        from process_review import (
+            handle_process_action,
+            next_process_keep_delay_days,
+            prompt_process,
+            record_process_keep,
+        )
 
         review_proc = dict(proc)
         review_proc["incident_id"] = str(incident.get("id") or "")
@@ -269,13 +290,19 @@ class ResourceMonitor:
                 "write_mib_s": float(incident.get("peak_write_mib_s", 0)),
             }
         ]
+        whitelist = self._load_process_whitelist()
+        keep_days = next_process_keep_delay_days(self.config, whitelist, review_proc)
         action = prompt_process(
             core,
             review_proc,
             float(self.config.get("process_snooze_hours", 24)),
-            1,
+            keep_days,
         )
-        handle_process_action(core, review_proc, action, self.config)
+        if action == "KEEP":
+            record_process_keep(whitelist, review_proc, core.record_keep)
+            self._save_process_whitelist(whitelist)
+        else:
+            handle_process_action(core, review_proc, action, self.config)
         return action
 
     def _return_default(self) -> Any:
@@ -410,6 +437,8 @@ class ResourceMonitor:
         recurrence = bool(recent_recovery and now - recent_recovery <= recurrence_window)
         peak_total = max(item["total_mib_s"] for item in window)
         peak_write = max(item["write_mib_s"] for item in window)
+        from process_review import process_keep_is_active
+
         resource_triage = triage_process(
             proc,
             guidance,
@@ -418,6 +447,20 @@ class ResourceMonitor:
             peak_write_mib_s=peak_write,
             recurrence=recurrence,
         )
+        if process_keep_is_active(
+            self.config,
+            self._load_process_whitelist(),
+            proc,
+            now=now,
+        ):
+            resource_triage = dict(resource_triage)
+            resource_triage.update(
+                {
+                    "decision": "suppress",
+                    "classification": "process-kept",
+                    "reason": "Process Leave window is still active.",
+                }
+            )
         suppressed = resource_triage["decision"] == "suppress"
         incident_id = f"{int(now)}-{instance[:12]}"
         command = str(proc.get("command") or proc.get("comm") or "process")
@@ -511,27 +554,43 @@ class ResourceMonitor:
             expected = incident.get("process_snapshot") or {}
             current = self.identity_reader(int(incident["pid"]))
             if identity.same(expected, current):
-                try:
-                    action = self.prompt_fn(current, incident)
-                except Exception as error:
-                    detail = str(error).strip() or type(error).__name__
-                    incident["prompt_status"] = "failed"
-                    incident["prompt_error"] = detail[:500]
+                from process_review import process_keep_is_active
+
+                if process_keep_is_active(
+                    self.config,
+                    self._load_process_whitelist(),
+                    current,
+                    now=now,
+                ):
+                    incident["prompt_status"] = "suppressed"
                     incident["prompted_at"] = now
-                    self.state["prompt_health"] = {
-                        "last_error": detail[:500],
-                        "last_error_at": now,
-                    }
-                    self._history("prompt-failed", incident, error=detail[:500])
+                    self._history(
+                        "prompt-skipped",
+                        incident,
+                        reason="process Leave window is active",
+                    )
                 else:
-                    incident["prompt_status"] = "completed"
-                    incident["prompt_action"] = str(action)
-                    incident["prompted_at"] = now
-                    self.state["prompt_health"] = {
-                        "last_error": "",
-                        "last_success_at": now,
-                    }
-                    self._history("prompted", incident, action=str(action))
+                    try:
+                        action = self.prompt_fn(current, incident)
+                    except Exception as error:
+                        detail = str(error).strip() or type(error).__name__
+                        incident["prompt_status"] = "failed"
+                        incident["prompt_error"] = detail[:500]
+                        incident["prompted_at"] = now
+                        self.state["prompt_health"] = {
+                            "last_error": detail[:500],
+                            "last_error_at": now,
+                        }
+                        self._history("prompt-failed", incident, error=detail[:500])
+                    else:
+                        incident["prompt_status"] = "completed"
+                        incident["prompt_action"] = str(action)
+                        incident["prompted_at"] = now
+                        self.state["prompt_health"] = {
+                            "last_error": "",
+                            "last_success_at": now,
+                        }
+                        self._history("prompted", incident, action=str(action))
             else:
                 incident["prompt_status"] = "stale"
                 incident["prompted_at"] = now

@@ -101,6 +101,38 @@ class ResourceMonitorTests(unittest.TestCase):
             click_path=self.history,
         )
 
+    def test_default_leave_persists_and_reuses_process_family_backoff(self):
+        first = proc(
+            command="Cursor --type=renderer --field-trial-handle=one",
+            comm="Cursor",
+        )
+        second = proc(
+            command="Cursor --type=renderer --field-trial-handle=two",
+            comm="Cursor",
+        )
+        incident = {
+            "id": "cursor-incident",
+            "triage": {"reason": "high I/O"},
+            "peak_total_mib_s": 80,
+            "peak_write_mib_s": 40,
+        }
+
+        with (
+            patch("process_review.legacy_prompt", return_value="KEEP") as prompt,
+            patch("activity_intelligence.investigation_suggestion", return_value=""),
+            patch("activity_intelligence.status", return_value={}),
+        ):
+            self.assertEqual(self.monitor._prompt_default(first, incident), "KEEP")
+            first_payload = prompt.call_args.args[1]
+            self.assertEqual(first_payload["keepDays"], 1)
+
+            self.assertEqual(self.monitor._prompt_default(second, incident), "KEEP")
+            second_payload = prompt.call_args.args[1]
+
+        self.assertEqual(second_payload["keepDays"], 2)
+        saved = json.loads(self.monitor.process_whitelist_path.read_text(encoding="utf-8"))
+        self.assertIn("process-family:Cursor", saved)
+
     def open_incident(self):
         p0 = proc(read=0, write=0)
         p1 = proc(read=160 * MIB, write=100 * MIB)

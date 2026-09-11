@@ -8,9 +8,16 @@ import os
 import signal
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable
 
-from idle_config import APP_SUPPORT_DIR, atomic_write_json, keep_entry_is_active, load_config, next_keep_delay_days
+from idle_config import (
+    APP_SUPPORT_DIR,
+    atomic_write_json,
+    keep_entry_is_active,
+    load_config,
+    next_keep_delay_days,
+    parse_keep_entry,
+)
 import process_identity as identity
 from process_sampling import get_candidate_processes
 from process_triage import triage_process
@@ -153,6 +160,67 @@ def process_action_policy(proc: dict[str, Any]) -> str:
     if name == "shortcuts" and ".app/Contents/MacOS/Shortcuts" in command:
         return "graceful-quit"
     return "review-only"
+
+
+def process_family_name(proc: dict[str, Any]) -> str:
+    """Return the executable family used by the user-facing Leave policy."""
+    raw = str(proc.get("comm") or proc.get("command") or "process").strip()
+    token = raw.split(None, 1)[0] if raw else "process"
+    return os.path.basename(token) or "process"
+
+
+def process_keep_keys(proc: dict[str, Any]) -> tuple[str, ...]:
+    """Return current and legacy keys that can identify one process family."""
+    family = process_family_name(proc)
+    process_key = str(proc.get("process_key") or identity.key(proc))
+    comm = str(proc.get("comm") or "").strip()
+    candidates = (f"process-family:{family}", family, comm, process_key)
+    return tuple(dict.fromkeys(value for value in candidates if value))
+
+
+def process_keep_entry(whitelist: dict[str, Any], proc: dict[str, Any]) -> dict[str, Any] | None:
+    """Choose the most protective valid Leave entry across old and new keys."""
+    entries = []
+    for key in process_keep_keys(proc):
+        entry = parse_keep_entry(whitelist.get(key))
+        if entry:
+            entries.append(entry)
+    return max(entries, key=lambda entry: (entry["keep_count"], entry["kept_at"]), default=None)
+
+
+def process_keep_is_active(
+    config: dict[str, Any],
+    whitelist: dict[str, Any],
+    proc: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    entry = process_keep_entry(whitelist, proc)
+    return bool(entry and keep_entry_is_active(config, entry, "process_", now=now))
+
+
+def next_process_keep_delay_days(
+    config: dict[str, Any],
+    whitelist: dict[str, Any],
+    proc: dict[str, Any],
+) -> float:
+    return next_keep_delay_days(config, process_keep_entry(whitelist, proc), "process_")
+
+
+def record_process_keep(
+    whitelist: dict[str, Any],
+    proc: dict[str, Any],
+    record_keep: Callable[[dict[str, Any], str], Any],
+) -> str:
+    """Record Leave under a stable family key while preserving old backoff counts."""
+    previous = process_keep_entry(whitelist, proc)
+    key = f"process-family:{process_family_name(proc)}"
+    record_keep(whitelist, key)
+    current = parse_keep_entry(whitelist.get(key))
+    if previous and current and current["keep_count"] < previous["keep_count"] + 1:
+        current["keep_count"] = previous["keep_count"] + 1
+        whitelist[key] = current
+    return key
 
 
 def _known_context(proc: dict[str, Any]) -> list[str]:
@@ -384,9 +452,7 @@ def run_process_audit(core: Any, config: dict[str, Any], prompt_budget: int | No
     existing = {x["process_key"] for x in queue}
     for proc in candidates:
         key = proc["process_key"]
-        kept = keep_entry_is_active(config, whitelist.get(key), "process_") or keep_entry_is_active(
-            config, whitelist.get(proc.get("comm")), "process_"
-        )
+        kept = process_keep_is_active(config, whitelist, proc)
         if key not in existing and not kept:
             queue.append({"process_key": key, "last_prompted": 0})
     queue.sort(key=lambda x: x.get("last_prompted", 0))
@@ -399,14 +465,14 @@ def run_process_audit(core: Any, config: dict[str, Any], prompt_budget: int | No
         proc = by_key.get(item["process_key"])
         if not proc or core.queue_item_is_snoozed(item, snooze):
             continue
-        keep_days = next_keep_delay_days(config, whitelist.get(item["process_key"]), "process_")
+        keep_days = next_process_keep_delay_days(config, whitelist, proc)
         action = prompt_process(core, proc, snooze, keep_days)
         if action == "QUIT":
             core.save_json(core.PROCESS_QUEUE_PATH, current)
             core.save_json(core.PROCESS_WHITELIST_PATH, whitelist)
             return False, done
         if action == "KEEP":
-            core.record_keep(whitelist, item["process_key"])
+            record_process_keep(whitelist, proc, core.record_keep)
             current = [x for x in current if x["process_key"] != item["process_key"]]
         else:
             handle_process_action(core, proc, action, config)

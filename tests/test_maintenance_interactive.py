@@ -1,7 +1,9 @@
+import io
 import os
 import signal
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -73,6 +75,23 @@ class MaintenanceInteractiveTests(unittest.TestCase):
             maintenance._finish_shortcut_review()
 
         review.assert_not_called()
+
+    def test_finish_shortcut_review_reports_automatic_skip_reason(self):
+        output = io.StringIO()
+        result = {
+            "ok": True,
+            "skipped": True,
+            "reason": "cooldown",
+            "nextEligibleAt": "2026-09-11T20:37:58-05:00",
+        }
+        with (
+            patch.object(maintenance, "load_config", return_value={"show_shortcuts_on_finish": True}),
+            patch.object(maintenance, "run_shortcut_review", return_value=result),
+            redirect_stderr(output),
+        ):
+            maintenance._finish_shortcut_review()
+
+        self.assertIn("cooling down", output.getvalue())
 
     def test_queue_snooze_uses_configured_window(self):
         item = {"last_prompted": 1_000}

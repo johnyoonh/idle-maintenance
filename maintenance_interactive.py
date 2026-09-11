@@ -162,7 +162,9 @@ def _run_app_review() -> bool:
             planned_app_output=stale_output,
         )
         if not process_ok:
-            return False
+            # Closing the process review ends this stage cleanly. Keep the app
+            # queue untouched, but still allow the post-review shortcut gate.
+            return True
         remaining_prompts = max(0, max_entries - process_prompts)
 
         stale_apps: list[str] = []
@@ -265,7 +267,7 @@ def _finish_shortcut_review() -> None:
     if not config.get("show_shortcuts_on_finish", True):
         return
     result = run_shortcut_review(config, automatic=True)
-    if not result.get("ok"):
+    if not result.get("ok") or result.get("skipped"):
         print(render_result(result), file=sys.stderr)
 
 
