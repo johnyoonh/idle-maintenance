@@ -31,6 +31,27 @@ class IdleWatcherShortcutTests(unittest.TestCase):
         self.assertTrue(sample(30))
         self.assertFalse(state["review_pending"])
 
+    def test_post_trigger_cooldown_keeps_due_review_pending(self):
+        pending, should_trigger = idle_watcher.review_cooldown_transition(
+            True,
+            review_pending=False,
+            now=120,
+            last_triggered=100,
+            cooldown_seconds=60,
+        )
+        self.assertTrue(pending)
+        self.assertFalse(should_trigger)
+
+        pending, should_trigger = idle_watcher.review_cooldown_transition(
+            True,
+            review_pending=pending,
+            now=160,
+            last_triggered=100,
+            cooldown_seconds=60,
+        )
+        self.assertFalse(pending)
+        self.assertTrue(should_trigger)
+
     def test_trigger_runs_resume_router_after_interactive_reviews(self):
         events = []
 
