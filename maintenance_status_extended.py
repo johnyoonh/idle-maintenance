@@ -43,6 +43,8 @@ def away_return_review_status(
         config.get("return_focus_command") or config.get("return_handoff_command"),
         root,
     )
+    obsidian = normalize_command(config.get("return_obsidian_command"), root)
+    srs = normalize_command(config.get("return_obsidian_srs_command"), root)
     return {
         "optional": True,
         "running": running,
@@ -53,6 +55,9 @@ def away_return_review_status(
         "cooldown_seconds": cooldown_seconds,
         "resume_focus_configured": bool(focus),
         "resume_focus_command": focus,
+        "obsidian_page_srs_configured": bool(obsidian and srs),
+        "obsidian_command": obsidian,
+        "obsidian_srs_command": srs,
     }
 
 
@@ -89,6 +94,11 @@ def render_text(status: dict[str, Any]) -> str:
             "- Resume focus: Hammerspoon context router configured"
             if watcher["resume_focus_configured"]
             else "- Resume focus: no coordinator command configured; legacy fallback only"
+        ),
+        (
+            "- Obsidian SRS: active page review configured"
+            if watcher["obsidian_page_srs_configured"]
+            else "- Obsidian SRS: not configured"
         ),
     ]
     if watcher.get("error"):

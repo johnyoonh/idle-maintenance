@@ -39,11 +39,63 @@ def review_gate_transition(
     return was_idle, review_pending, False
 
 
+def _run_return_command(command, *, command_runner):
+    try:
+        result = command_runner(command, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        return {
+            "command": command,
+            "returncode": 127,
+            "error": str(error),
+        }
+
+    returncode = int(getattr(result, "returncode", 0))
+    return {
+        "command": command,
+        "returncode": returncode,
+        "error": "" if returncode == 0 else f"exit {returncode}",
+    }
+
+
+def open_return_page_review(
+    config,
+    *,
+    command_runner=subprocess.run,
+    sleep_fn=time.sleep,
+):
+    """Activate Obsidian and review the Markdown page it currently shows."""
+    obsidian_command = normalize_command(config.get("return_obsidian_command"))
+    srs_command = normalize_command(config.get("return_obsidian_srs_command"))
+    if not obsidian_command and not srs_command:
+        return {"configured": False, "ok": True, "steps": []}
+
+    steps = []
+    if obsidian_command:
+        steps.append(_run_return_command(obsidian_command, command_runner=command_runner))
+
+    if srs_command:
+        if obsidian_command:
+            try:
+                delay = max(0.0, float(config.get("return_obsidian_srs_delay_seconds", 0.8)))
+            except (TypeError, ValueError):
+                delay = 0.8
+            if delay:
+                sleep_fn(delay)
+        steps.append(_run_return_command(srs_command, command_runner=command_runner))
+
+    return {
+        "configured": True,
+        "ok": all(step["returncode"] == 0 for step in steps),
+        "steps": steps,
+    }
+
+
 def trigger_maintenance(
     *,
     command_runner=subprocess.run,
+    sleep_fn=time.sleep,
 ):
-    """Finish interactive reviews, then delegate focus to the resume router."""
+    """Finish reviews, restore focus, then open Obsidian's current-page SRS."""
     interactive_script = os.path.join(BASE_DIR, "maintenance_interactive.py")
     child_env = os.environ.copy()
     child_env.pop("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW", None)
@@ -61,30 +113,32 @@ def trigger_maintenance(
             focus_returncode = int(focus_result.returncode)
         except (OSError, subprocess.SubprocessError) as error:
             focus_error = str(error)
-    if focus_returncode == 0:
-        return {
-            "ok": True,
-            "command": focus_command,
-            "returncode": 0,
-            "fallback": False,
-            "error": "",
-        }
+    if focus_returncode != 0:
+        # Preserve the existing handoff as a fail-safe when Hammerspoon or the
+        # configured coordinator cannot be launched.
+        target_url = get_handoff_url(config)
+        if target_url:
+            command_runner(["open", target_url], check=False)
+        else:
+            target_app = get_handoff_app(config)
+            if target_app:
+                command_runner(["open", "-a", target_app], check=False)
 
-    # Preserve the existing handoff as a fail-safe when Hammerspoon or the
-    # configured coordinator cannot be launched.
-    target_url = get_handoff_url(config)
-    if target_url:
-        command_runner(["open", target_url], check=False)
-    else:
-        target_app = get_handoff_app(config)
-        if target_app:
-            command_runner(["open", "-a", target_app], check=False)
+    page_review = open_return_page_review(
+        config,
+        command_runner=command_runner,
+        sleep_fn=sleep_fn,
+    )
     return {
-        "ok": False,
+        "ok": focus_returncode == 0,
         "command": focus_command,
         "returncode": focus_returncode,
-        "fallback": True,
-        "error": focus_error or f"resume focus exited {focus_returncode}",
+        "fallback": focus_returncode != 0,
+        "error": (
+            focus_error
+            or (f"resume focus exited {focus_returncode}" if focus_returncode != 0 else "")
+        ),
+        "page_review": page_review,
     }
 
 

@@ -27,6 +27,27 @@ class MaintenanceStatusExtendedTests(unittest.TestCase):
         self.assertEqual(status["return_idle_below_seconds"], 30)
         self.assertEqual(status["cooldown_seconds"], 3600)
         self.assertTrue(status["resume_focus_configured"])
+        self.assertFalse(status["obsidian_page_srs_configured"])
+
+    def test_away_return_status_reports_obsidian_page_srs(self):
+        config = self.config()
+        config.update(
+            {
+                "return_obsidian_command": ["open", "-a", "Obsidian"],
+                "return_obsidian_srs_command": ["open", "obsidian://adv-uri?..."],
+            }
+        )
+        status = extended.away_return_review_status(
+            config,
+            command_runner=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                [], 1, stdout="", stderr=""
+            ),
+            home=Path("/tmp/home"),
+        )
+
+        self.assertTrue(status["obsidian_page_srs_configured"])
+        self.assertEqual(status["obsidian_command"], ["open", "-a", "Obsidian"])
+        self.assertEqual(status["obsidian_srs_command"], ["open", "obsidian://adv-uri?..."])
 
     def test_optional_watcher_does_not_change_core_health(self):
         base_status = {

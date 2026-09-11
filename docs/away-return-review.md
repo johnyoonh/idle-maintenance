@@ -56,8 +56,8 @@ Default policy:
 - keep the stricter 15-minute threshold for queued resource-incident prompts;
 - deliver any armed resource prompt before the general interactive maintenance review;
 - run interactive app/process maintenance;
-- invoke `open hammerspoon://resumerouter` as the final UI;
-- fall back to the configured handoff URL or app if the coordinator cannot launch.
+- invoke `open hammerspoon://resumerouter` (or its configured fallback);
+- activate Obsidian and open Spaced Repetition for the active Markdown page.
 
 The return detector persists its armed/cooldown state and records the most recent return-flow success or failure in resource-monitor health. This prevents a monitor restart from turning a single return into repeated resume launches.
 
@@ -68,9 +68,13 @@ The Hammerspoon coordinator asks wiki-automation for the highest-ranked TaskForg
 Examples include a tuition URL, a direct subscription-email or draft link, a Canvas course page, or a saved interview-preparation conversation. Public docs and tests use synthetic domains and profile names; real targets remain in the private vault.
 
 After an interactive app/process maintenance review, Idle Maintenance opens at
-most one shortcut provider per local day. The resident contextual handoff alone
-does not open a shortcut review, so it cannot steal focus from the selected work
-target.
+most one shortcut provider per cooldown window. The return flow separately
+activates Obsidian and invokes the plugin command
+`obsidian-spaced-repetition:srs-review-flashcards-in-note`, so the current page's
+cards are available immediately. Set `return_obsidian_command` or
+`return_obsidian_srs_command` to an empty value to omit that command; the
+shortcuts provider remains independently controlled by
+`show_shortcuts_on_finish`.
 
 ## Legacy watcher
 

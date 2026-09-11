@@ -89,6 +89,12 @@ DEFAULT_CONFIG = {
     "return_from_away_minutes": 15,
     "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",
     "return_flashcard_refresh_command": f"{LOCAL_BIN_DIR}/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
+    "return_obsidian_command": ["open", "-a", "Obsidian"],
+    "return_obsidian_srs_command": [
+        "open",
+        "obsidian://adv-uri?vault=wiki&commandid=obsidian-spaced-repetition%3Asrs-review-flashcards-in-note",
+    ],
+    "return_obsidian_srs_delay_seconds": 0.8,
     "apple_shortcut_review_refresh_command": [
         "node", "~/repos/apple-shortcuts/scripts/shortcut-review.mjs", "refresh", "--json",
     ],

@@ -241,6 +241,14 @@ menu choices remain available at any time. Use `maint shortcuts --provider keybo
 `maint shortcuts --provider apple` to open either provider directly; the menu
 offers the same two choices under **Review Shortcuts**.
 
+The away-return trigger also activates Obsidian and opens the Spaced Repetition
+review for the active Markdown page immediately. The default commands are
+`return_obsidian_command` and
+`return_obsidian_srs_command` (the latter uses
+`obsidian-spaced-repetition:srs-review-flashcards-in-note` through Obsidian's
+Advanced URI handler). This page review is separate from the rate-limited
+shortcut-review provider.
+
 The legacy watcher reads configuration from the first available file in this order:
 
 ```bash

@@ -56,6 +56,41 @@ class IdleWatcherShortcutTests(unittest.TestCase):
         self.assertEqual(events[1][1], ["open", "hammerspoon://resumerouter"])
         self.assertFalse(result["fallback"])
 
+    def test_trigger_opens_obsidian_and_current_page_srs_after_focus(self):
+        events = []
+
+        def command_runner(command, **kwargs):
+            events.append(("command", command, kwargs))
+            return subprocess.CompletedProcess(command, 0)
+
+        config = {
+            "return_focus_command": ["open", "hammerspoon://resumerouter"],
+            "return_obsidian_command": ["open", "-a", "Obsidian"],
+            "return_obsidian_srs_command": [
+                "open",
+                "obsidian://adv-uri?vault=wiki&commandid=obsidian-spaced-repetition%3Asrs-review-flashcards-in-note",
+            ],
+            "return_obsidian_srs_delay_seconds": 0,
+        }
+        with patch.object(idle_watcher, "load_config", return_value=config):
+            result = idle_watcher.trigger_maintenance(
+                command_runner=command_runner,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(events[0][1][-1].endswith("maintenance_interactive.py"))
+        self.assertEqual(events[1][1], ["open", "hammerspoon://resumerouter"])
+        self.assertEqual(events[2][1], ["open", "-a", "Obsidian"])
+        self.assertEqual(
+            events[3][1],
+            [
+                "open",
+                "obsidian://adv-uri?vault=wiki&commandid=obsidian-spaced-repetition%3Asrs-review-flashcards-in-note",
+            ],
+        )
+        self.assertTrue(result["page_review"]["ok"])
+        self.assertEqual(len(result["page_review"]["steps"]), 2)
+
     def test_failed_resume_router_uses_legacy_handoff(self):
         events = []
 

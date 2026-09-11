@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime
 
-from idle_config import is_terminal_suggestion_time, next_keep_delay_days
+from idle_config import DEFAULT_CONFIG, is_terminal_suggestion_time, next_keep_delay_days
 
 
 class IdleConfigTests(unittest.TestCase):
@@ -39,6 +39,17 @@ class IdleConfigTests(unittest.TestCase):
 
         self.assertEqual(next_keep_delay_days(config, None), 30)
         self.assertEqual(next_keep_delay_days(config, {"kept_at": 1, "keep_count": 2}), 120)
+
+    def test_return_review_defaults_to_obsidian_current_page_srs(self):
+        self.assertEqual(DEFAULT_CONFIG["return_obsidian_command"], ["open", "-a", "Obsidian"])
+        self.assertEqual(
+            DEFAULT_CONFIG["return_obsidian_srs_command"],
+            [
+                "open",
+                "obsidian://adv-uri?vault=wiki&commandid=obsidian-spaced-repetition%3Asrs-review-flashcards-in-note",
+            ],
+        )
+        self.assertEqual(DEFAULT_CONFIG["return_obsidian_srs_delay_seconds"], 0.8)
 
 
 if __name__ == "__main__":
