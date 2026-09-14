@@ -69,6 +69,31 @@ class ShortcutReviewTests(unittest.TestCase):
         self.assertEqual(result["browser_audit"], audit_payload)
         self.assertIn("Browser shortcut audit: 1 conflict(s)", render_result(result))
 
+    def test_failed_browser_audit_is_visible_but_does_not_hide_review(self):
+        calls = []
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            if command[0] == "browser-audit":
+                return subprocess.CompletedProcess(command, 7, stdout="", stderr="audit unavailable")
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        result = run_shortcut_review(
+            {
+                "browser_shortcut_audit_command": ["browser-audit"],
+                "return_flashcard_refresh_command": ["keyboard-refresh"],
+                "return_shortcut_popup_command": ["keyboard-popup"],
+            },
+            runner=runner,
+            provider="keyboard",
+            state_path=Path(tempfile.mkdtemp()) / "state.json",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [["browser-audit"], ["keyboard-refresh"], ["keyboard-popup"]])
+        self.assertIn("Browser shortcut audit: 1 warning(s)", render_result(result))
+        self.assertEqual(result["browser_audit"]["warnings"], ["browser shortcut audit failed: audit unavailable"])
+
     def test_failed_refresh_prevents_stale_popup(self):
         calls = []
 

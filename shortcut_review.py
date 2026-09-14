@@ -196,8 +196,16 @@ def _run_provider(
                 completed = runner(audit_command, capture_output=True, text=True, check=False)
             except (OSError, subprocess.SubprocessError) as error:
                 # The audit is advisory.  Keep the normal review available if
-                # the optional browser tooling is unavailable.
-                steps.append({"name": "browser-audit", "command": audit_command, "returncode": 126, "stdout": "", "stderr": str(error)})
+                # the optional browser tooling is unavailable, but make the
+                # missing diagnostic visible in the maintenance result.
+                detail = str(error)
+                browser_audit = {
+                    "ok": False,
+                    "conflicts": [],
+                    "stale_assignments": [],
+                    "warnings": [f"browser shortcut audit unavailable: {detail}"],
+                }
+                steps.append({"name": "browser-audit", "command": audit_command, "returncode": 126, "stdout": "", "stderr": detail})
             else:
                 audit_step = _step_result("browser-audit", audit_command, completed)
                 steps.append(audit_step)
@@ -205,7 +213,20 @@ def _run_provider(
                     parsed = json.loads(audit_step["stdout"])
                     browser_audit = parsed if isinstance(parsed, dict) else None
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    browser_audit = None
+                    browser_audit = {
+                        "ok": False,
+                        "conflicts": [],
+                        "stale_assignments": [],
+                        "warnings": ["browser shortcut audit returned invalid JSON"],
+                    }
+                if completed.returncode != 0:
+                    detail = audit_step["stderr"] or audit_step["stdout"] or f"exit {completed.returncode}"
+                    browser_audit = {
+                        "ok": False,
+                        "conflicts": [],
+                        "stale_assignments": [],
+                        "warnings": [f"browser shortcut audit failed: {detail}"],
+                    }
 
     for name, command in (("refresh", refresh), ("popup", popup)):
         try:
