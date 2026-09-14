@@ -51,6 +51,12 @@ class IdleConfigTests(unittest.TestCase):
         )
         self.assertEqual(DEFAULT_CONFIG["return_obsidian_srs_delay_seconds"], 0.8)
 
+    def test_keyboard_review_refreshes_browser_shortcut_audit(self):
+        command = DEFAULT_CONFIG["browser_shortcut_audit_command"]
+        self.assertIn("kb browser audit", command)
+        self.assertIn("--refresh", command)
+        self.assertIn("--json", command)
+
 
 if __name__ == "__main__":
     unittest.main()

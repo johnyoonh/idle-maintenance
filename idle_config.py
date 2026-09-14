@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     "return_from_away_minutes": 15,
     "return_shortcut_popup_command": f"{LOCAL_BIN_DIR}/kb popup --surface gui --group auto --force",
     "return_flashcard_refresh_command": f"{LOCAL_BIN_DIR}/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0",
+    "browser_shortcut_audit_command": f"{LOCAL_BIN_DIR}/kb browser audit --browser both --refresh --json",
     "return_obsidian_command": ["open", "-a", "Obsidian"],
     "return_obsidian_srs_command": [
         "open",

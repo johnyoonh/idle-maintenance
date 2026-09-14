@@ -30,9 +30,17 @@ is tried, and only a successful display updates rotation state.
 Default command sequence:
 
 ```bash
+$HOME/.local/bin/kb browser audit --browser both --refresh --json
 $HOME/.local/bin/kb export-srs --mode focused --max-shortcut-cards 7 --underused-limit 0
 $HOME/.local/bin/kb popup --surface gui --group auto --force
 ```
+
+The browser audit is read-only and runs first. It refreshes the extension
+shortcut catalog, checks profile identity and stale assignments, and reports
+browser-owned collisions such as Edge Visual Search/Lens
+`Option+Shift+S`. A collision does not prevent the shortcut review popup; the
+Hammerspoon maintenance alert includes a concise warning so the assignment can
+be corrected after the browser is unlocked.
 
 Use `maint shortcuts --provider keyboard` or `maint shortcuts --provider apple`
 to bypass rotation and open a particular provider. The menu-bar app exposes the

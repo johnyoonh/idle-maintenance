@@ -10,7 +10,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import maint
-from shortcut_review import normalize_command, run_shortcut_review
+from shortcut_review import normalize_command, render_result, run_shortcut_review
 
 
 class ShortcutReviewTests(unittest.TestCase):
@@ -39,6 +39,35 @@ class ShortcutReviewTests(unittest.TestCase):
             ["kb", "export-srs", "--mode", "focused"],
             ["kb", "popup", "--force"],
         ])
+
+    def test_browser_audit_runs_before_keyboard_refresh_and_is_retained(self):
+        calls = []
+        audit_payload = {
+            "ok": True,
+            "has_conflicts": True,
+            "conflicts": [{"message": "Simplify / _execute_action uses alt+shift+s"}],
+        }
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            stdout = json.dumps(audit_payload) if command[0] == "browser-audit" else "ok"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        result = run_shortcut_review(
+            {
+                "browser_shortcut_audit_command": ["browser-audit"],
+                "return_flashcard_refresh_command": ["keyboard-refresh"],
+                "return_shortcut_popup_command": ["keyboard-popup"],
+            },
+            runner=runner,
+            provider="keyboard",
+            state_path=Path(tempfile.mkdtemp()) / "state.json",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [["browser-audit"], ["keyboard-refresh"], ["keyboard-popup"]])
+        self.assertEqual(result["browser_audit"], audit_payload)
+        self.assertIn("Browser shortcut audit: 1 conflict(s)", render_result(result))
 
     def test_failed_refresh_prevents_stale_popup(self):
         calls = []

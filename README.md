@@ -241,6 +241,12 @@ menu choices remain available at any time. Use `maint shortcuts --provider keybo
 `maint shortcuts --provider apple` to open either provider directly; the menu
 offers the same two choices under **Review Shortcuts**.
 
+The keyboard provider first runs `kb browser audit --browser both --refresh
+--json`. This read-only check refreshes browser extension shortcut state and
+reports reserved-browser or stale-assignment warnings in the maintenance
+result. The Hammerspoon shortcut alert surfaces the warning without hiding the
+review popup.
+
 The away-return trigger also activates Obsidian and opens the Spaced Repetition
 review for the active Markdown page immediately. The default commands are
 `return_obsidian_command` and

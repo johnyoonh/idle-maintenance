@@ -79,6 +79,11 @@ def _provider_commands(config: dict[str, Any], provider: str, home: Path) -> tup
     )
 
 
+def _browser_audit_command(config: dict[str, Any], home: Path) -> list[str]:
+    """Return the optional read-only browser audit run before keyboard review."""
+    return normalize_command(config.get("browser_shortcut_audit_command"), home)
+
+
 def _last_shown(state: dict[str, Any], provider: str) -> str:
     return str(state.get("providers", {}).get(provider, {}).get("lastShownAt", ""))
 
@@ -183,26 +188,45 @@ def _run_provider(
         return {"ok": False, "provider": provider, "failed_step": "popup", "error": f"No {provider} review command is configured.", "steps": []}
 
     steps: list[dict[str, Any]] = []
+    browser_audit: dict[str, Any] | None = None
+    if provider == "keyboard":
+        audit_command = _browser_audit_command(config, home)
+        if audit_command:
+            try:
+                completed = runner(audit_command, capture_output=True, text=True, check=False)
+            except (OSError, subprocess.SubprocessError) as error:
+                # The audit is advisory.  Keep the normal review available if
+                # the optional browser tooling is unavailable.
+                steps.append({"name": "browser-audit", "command": audit_command, "returncode": 126, "stdout": "", "stderr": str(error)})
+            else:
+                audit_step = _step_result("browser-audit", audit_command, completed)
+                steps.append(audit_step)
+                try:
+                    parsed = json.loads(audit_step["stdout"])
+                    browser_audit = parsed if isinstance(parsed, dict) else None
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    browser_audit = None
+
     for name, command in (("refresh", refresh), ("popup", popup)):
         try:
             completed = runner(command, capture_output=True, text=True, check=False)
         except (OSError, subprocess.SubprocessError) as error:
             steps.append({"name": name, "command": command, "returncode": 126, "stdout": "", "stderr": str(error)})
-            return {"ok": False, "provider": provider, "failed_step": name, "error": str(error), "steps": steps}
+            return {"ok": False, "provider": provider, "failed_step": name, "error": str(error), "steps": steps, "browser_audit": browser_audit}
         step = _step_result(name, command, completed)
         steps.append(step)
         if completed.returncode != 0:
             detail = step["stderr"] or step["stdout"] or f"exit {completed.returncode}"
-            return {"ok": False, "provider": provider, "failed_step": name, "error": detail, "steps": steps}
+            return {"ok": False, "provider": provider, "failed_step": name, "error": detail, "steps": steps, "browser_audit": browser_audit}
         if provider == "apple" and name == "refresh" and require_candidates:
             try:
                 actionable = int(json.loads(step["stdout"]).get("actionableCount", 0))
             except (TypeError, ValueError, json.JSONDecodeError):
-                return {"ok": False, "provider": provider, "failed_step": "refresh", "error": "Apple review refresh did not return valid JSON.", "steps": steps}
+                return {"ok": False, "provider": provider, "failed_step": "refresh", "error": "Apple review refresh did not return valid JSON.", "steps": steps, "browser_audit": browser_audit}
             if actionable == 0:
-                return {"ok": True, "provider": provider, "skipped": True, "reason": "no-candidates", "failed_step": None, "error": "", "steps": steps}
+                return {"ok": True, "provider": provider, "skipped": True, "reason": "no-candidates", "failed_step": None, "error": "", "steps": steps, "browser_audit": browser_audit}
 
-    return {"ok": True, "provider": provider, "skipped": False, "failed_step": None, "error": "", "steps": steps}
+    return {"ok": True, "provider": provider, "skipped": False, "failed_step": None, "error": "", "steps": steps, "browser_audit": browser_audit}
 
 
 def run_shortcut_review(
@@ -275,6 +299,19 @@ def render_result(result: dict[str, Any]) -> str:
             return f"Shortcut review is cooling down until {result.get('nextEligibleAt')}."
         return "No Apple Shortcut candidates were due for review."
     if result.get("ok"):
+        audit = result.get("browser_audit") or {}
+        conflicts = audit.get("conflicts", []) if isinstance(audit, dict) else []
+        warnings = audit.get("warnings", []) if isinstance(audit, dict) else []
+        if conflicts or warnings:
+            details = []
+            if conflicts:
+                details.append(f"{len(conflicts)} conflict(s)")
+            if warnings:
+                details.append(f"{len(warnings)} warning(s)")
+            return (
+                f"{str(result.get('provider', 'shortcut')).title()} shortcut review opened. "
+                "Browser shortcut audit: " + ", ".join(details) + "."
+            )
         return f"{str(result.get('provider', 'shortcut')).title()} shortcut review opened."
     step = str(result.get("failed_step") or "review")
     detail = str(result.get("error") or "unknown error")
