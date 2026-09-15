@@ -166,11 +166,49 @@ def active_action_paths(
         }
 
 
+def _has_pending_jobs(state_path: str, lock_path: str | None) -> bool:
+    try:
+        with _locked_state(state_path, lock_path=lock_path) as state:
+            return any(job.get("state") == "pending" for job in state.get("jobs", []))
+    except Exception:
+        return False
+
+
+def _acquire_worker_lock(
+    worker_lock_fd: int,
+    *,
+    has_pending_jobs: Callable[[], bool] | None = None,
+    retries: int = 20,
+    retry_delay: float = 0.05,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> bool:
+    try:
+        fcntl.flock(worker_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        pass
+
+    if has_pending_jobs is None or not has_pending_jobs():
+        return False
+
+    for _ in range(retries):
+        sleep_fn(retry_delay)
+        try:
+            fcntl.flock(worker_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            pass
+        if not has_pending_jobs():
+            return False
+    return False
+
+
 def _claim_next_job(
     *,
     state_path: str,
     lock_path: str | None,
     now: float,
+    worker_lock_fileno: int | None = None,
 ) -> dict[str, Any] | None:
     claimed: dict[str, Any] | None = None
     with _locked_state(state_path, lock_path=lock_path, now=now) as state:
@@ -185,6 +223,11 @@ def _claim_next_job(
                     job["error"] = ""
                     claimed = dict(job)
                     break
+        elif worker_lock_fileno is not None:
+            try:
+                fcntl.flock(worker_lock_fileno, fcntl.LOCK_UN)
+            except OSError:
+                pass
     return claimed
 
 
@@ -285,13 +328,21 @@ def run_worker(
     base_dir: str = BASE_DIR,
     execute: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     now_fn: Callable[[], float] = time.time,
+    retries: int = 20,
+    retry_delay: float = 0.05,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> int:
     """Run pending destructive actions strictly one at a time under a singleton lock."""
     os.makedirs(os.path.dirname(worker_lock_path), exist_ok=True)
     with open(worker_lock_path, "a+", encoding="utf-8") as worker_lock:
-        try:
-            fcntl.flock(worker_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        acquired = _acquire_worker_lock(
+            worker_lock.fileno(),
+            has_pending_jobs=lambda: _has_pending_jobs(state_path, state_lock_path),
+            retries=retries,
+            retry_delay=retry_delay,
+            sleep_fn=sleep_fn,
+        )
+        if not acquired:
             return 0
         worker_lock.seek(0)
         worker_lock.truncate()
@@ -309,6 +360,7 @@ def run_worker(
                 state_path=state_path,
                 lock_path=state_lock_path,
                 now=float(now_fn()),
+                worker_lock_fileno=worker_lock.fileno(),
             )
             if claimed is None:
                 break
@@ -325,7 +377,10 @@ def run_worker(
                 lock_path=state_lock_path,
                 now=float(now_fn()),
             )
-        fcntl.flock(worker_lock.fileno(), fcntl.LOCK_UN)
+        try:
+            fcntl.flock(worker_lock.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
     return 0
 
 

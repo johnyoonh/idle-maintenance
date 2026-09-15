@@ -5,6 +5,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import time
@@ -96,6 +97,101 @@ KNOWN_PROCESS_PROFILES = (
         "role": "Core macOS system service",
         "default_action": "Do not terminate it. Treat sustained resource use as a symptom and inspect the applications, display workload, power state, or trust activity driving it.",
     },
+    {
+        "names": {
+            "microsoft edge helper",
+            "microsoft edge helper (renderer)",
+            "microsoft edge helper (gpu)",
+            "microsoft edge",
+        },
+        "prefixes": ("microsoft edge helper", "msedge"),
+        "command_contains": (
+            "Microsoft Edge.app",
+            "Microsoft Edge Helper",
+        ),
+        "recurrence_group": "browser:microsoft-edge",
+        "role": "Microsoft Edge web browser helper/renderer",
+        "default_action": "Leave it running while web tabs, extensions, or background pages settle; inspect Edge's built-in Browser Task Manager if activity persists.",
+        "action_policy": "observe-first",
+        "cpu_review_multiplier": 2.0,
+        "io_review_multiplier": 4.0,
+    },
+    {
+        "names": {
+            "google chrome helper",
+            "google chrome helper (renderer)",
+            "google chrome helper (gpu)",
+            "google chrome",
+        },
+        "prefixes": ("google chrome helper", "chrome"),
+        "command_contains": (
+            "Google Chrome.app",
+            "Google Chrome Helper",
+        ),
+        "recurrence_group": "browser:google-chrome",
+        "role": "Google Chrome web browser helper/renderer",
+        "default_action": "Leave it running while web tabs, extensions, or background pages settle; inspect Chrome's built-in Task Manager if activity persists.",
+        "action_policy": "observe-first",
+        "cpu_review_multiplier": 2.0,
+        "io_review_multiplier": 4.0,
+    },
+    {
+        "names": {
+            "brave browser helper",
+            "brave browser helper (renderer)",
+            "brave browser helper (gpu)",
+            "brave browser",
+        },
+        "prefixes": ("brave browser helper", "brave"),
+        "command_contains": (
+            "Brave Browser.app",
+            "Brave Browser Helper",
+        ),
+        "recurrence_group": "browser:brave",
+        "role": "Brave web browser helper/renderer",
+        "default_action": "Leave it running while web tabs, extensions, or background pages settle; inspect Brave's built-in Task Manager if activity persists.",
+        "action_policy": "observe-first",
+        "cpu_review_multiplier": 2.0,
+        "io_review_multiplier": 4.0,
+    },
+    {
+        "names": {
+            "arc helper",
+            "arc helper (renderer)",
+            "arc helper (gpu)",
+            "arc",
+        },
+        "prefixes": ("arc helper",),
+        "command_contains": (
+            "Arc.app",
+            "Arc Helper",
+        ),
+        "recurrence_group": "browser:arc",
+        "role": "Arc web browser helper/renderer",
+        "default_action": "Leave it running while web tabs, extensions, or background pages settle; inspect Arc's built-in Task Manager if activity persists.",
+        "action_policy": "observe-first",
+        "cpu_review_multiplier": 2.0,
+        "io_review_multiplier": 4.0,
+    },
+    {
+        "names": {
+            "safari web content",
+            "com.apple.webkit.webcontent",
+            "com.apple.webkit.networking",
+            "com.apple.webkit.gpu",
+        },
+        "prefixes": ("com.apple.webkit.", "safari"),
+        "command_contains": (
+            "Safari.app",
+            "WebKit.WebContent",
+        ),
+        "recurrence_group": "browser:safari",
+        "role": "Safari web browser helper/renderer",
+        "default_action": "Leave it running while web tabs settle; close heavy tabs if activity persists.",
+        "action_policy": "observe-first",
+        "cpu_review_multiplier": 2.0,
+        "io_review_multiplier": 4.0,
+    },
 )
 
 PROTECTED_APPLE_DAEMONS = {
@@ -107,9 +203,15 @@ PROTECTED_PREFIXES = tuple(
 
 
 def _base_name(proc: dict[str, Any]) -> str:
+    comm = str(proc.get("comm") or "").strip()
+    if comm:
+        return (os.path.basename(comm) or "process").lower()
     command = str(proc.get("command") or "").strip()
-    token = (command.split() or [str(proc.get("comm") or "process")])[0]
-    return (os.path.basename(token) or os.path.basename(str(proc.get("comm") or "")) or "process").lower()
+    comm = identity.extract_comm(command) if hasattr(identity, "extract_comm") else ""
+    if comm:
+        return (os.path.basename(comm) or "process").lower()
+    token = (command.split() or ["process"])[0]
+    return (os.path.basename(token) or "process").lower()
 
 
 def _display(proc: dict[str, Any]) -> str:
@@ -137,6 +239,24 @@ def known_process_guidance(proc: dict[str, Any]) -> dict[str, Any] | None:
                 "action_policy": str(profile.get("action_policy") or "protected"),
                 "cpu_review_multiplier": float(profile.get("cpu_review_multiplier", 0) or 0),
                 "io_review_multiplier": float(profile.get("io_review_multiplier", 0) or 0),
+            }
+
+    cmd_lower = command.lower()
+    if "--type=renderer" in cmd_lower or "--type=gpu-process" in cmd_lower or " helper" in name or "helper.app" in cmd_lower:
+        m = re.search(r"/([^/]+)\.app(?:/|$)", command, re.IGNORECASE)
+        if m:
+            app_name = m.group(1)
+            slug = re.sub(r"[^a-z0-9]+", "-", app_name.lower()).strip("-")
+            group_prefix = "browser" if any(b in slug for b in ("browser", "chrome", "edge", "safari", "firefox", "arc", "brave", "opera", "vivaldi")) else "app"
+            return {
+                "name": name,
+                "recurrence_group": f"{group_prefix}:{slug}",
+                "role": f"{app_name} helper/renderer",
+                "default_action": f"Leave it running while background tasks or tabs settle; inspect {app_name} if activity persists.",
+                "policy": "observe-first",
+                "action_policy": "observe-first",
+                "cpu_review_multiplier": 2.0,
+                "io_review_multiplier": 4.0,
             }
     return None
 

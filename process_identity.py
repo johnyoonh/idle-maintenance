@@ -1,6 +1,6 @@
 """macOS process identity and cumulative disk-I/O counters."""
 from __future__ import annotations
-import ctypes, hashlib, os, shlex, subprocess, sys
+import ctypes, hashlib, os, re, shlex, subprocess, sys
 
 class RUsageInfoV2(ctypes.Structure):
     _fields_ = [
@@ -46,6 +46,26 @@ def normalize(command):
     try: return " ".join(shlex.split(command or ""))
     except ValueError: return " ".join(str(command or "").split())
 
+def extract_comm(command):
+    cmd = (command or "").strip()
+    if not cmd:
+        return ""
+    if cmd.startswith("/"):
+        parts = cmd.split()
+        for i in range(len(parts), 0, -1):
+            candidate = " ".join(parts[:i])
+            if os.path.isfile(candidate):
+                return candidate
+        m = re.match(r"^(/.*?)(?:\s+-[a-zA-Z0-9_\-]+|\s*$)", cmd)
+        if m:
+            return m.group(1).strip()
+        return cmd
+    try:
+        command_parts = shlex.split(cmd)
+    except ValueError:
+        command_parts = cmd.split()
+    return command_parts[0] if command_parts else cmd
+
 def fingerprint(command):
     return hashlib.sha256(normalize(command).encode("utf-8", "replace")).hexdigest()
 
@@ -58,11 +78,7 @@ def parse_line(line):
     if len(parts) < 11: return None
     pid, ppid, uid, cpu, etime = parts[:5]
     started = " ".join(parts[5:10]); command = parts[10]
-    try:
-        command_parts = shlex.split(command)
-    except ValueError:
-        command_parts = command.split()
-    comm = command_parts[0] if command_parts else command
+    comm = extract_comm(command)
     try:
         proc = {"pid": int(pid), "ppid": int(ppid), "uid": int(uid), "user": str(uid),
                 "cpu": float(cpu), "etime": etime, "elapsed_seconds": etime_seconds(etime),

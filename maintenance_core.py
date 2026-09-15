@@ -6,6 +6,7 @@ import time
 import sys
 import shlex
 import shutil
+import signal
 import tempfile
 import uuid
 from pathlib import Path
@@ -841,6 +842,108 @@ def run_process_audit(config, prompt_budget=None):
     save_json(PROCESS_WHITELIST_PATH, process_whitelist)
     return True, processed
 
+def find_app_pids(app_path, ps_runner=None):
+    """Find PIDs whose executable binary resides inside the specified app bundle."""
+    try:
+        norm_app = os.path.realpath(os.path.abspath(app_path))
+    except Exception:
+        norm_app = os.path.abspath(app_path)
+    norm_app_prefix = norm_app if norm_app.endswith(os.sep) else norm_app + os.sep
+
+    if ps_runner is not None:
+        raw_output = ps_runner()
+    else:
+        try:
+            raw_output = subprocess.check_output(
+                ["ps", "-axo", "pid=,comm="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return []
+
+    if not isinstance(raw_output, str):
+        if hasattr(raw_output, "stdout") and isinstance(raw_output.stdout, str):
+            raw_output = raw_output.stdout
+        else:
+            raw_output = str(raw_output or "")
+
+    pids = []
+    my_pid = os.getpid()
+    for line in raw_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid_str, comm = parts[0], parts[1]
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == my_pid:
+            continue
+        try:
+            norm_comm = os.path.realpath(os.path.abspath(comm))
+        except Exception:
+            norm_comm = os.path.abspath(comm)
+        if norm_comm == norm_app or norm_comm.startswith(norm_app_prefix):
+            pids.append(pid)
+    return pids
+
+
+def terminate_app_processes(
+    app_path,
+    cleanup_config=None,
+    ps_runner=None,
+    signal_fn=os.kill,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+):
+    """App-identity-scoped graceful termination with bounded SIGKILL fallback."""
+    pids = find_app_pids(app_path, ps_runner=ps_runner)
+    if not pids:
+        return
+
+    config = cleanup_config or {}
+    grace_seconds = max(0.0, float(config.get("terminate_grace_seconds", 3.0)))
+    poll_seconds = max(0.05, float(config.get("terminate_poll_seconds", 0.1)))
+
+    alive = set()
+    for pid in pids:
+        try:
+            signal_fn(pid, signal.SIGTERM)
+            alive.add(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    if not alive or grace_seconds <= 0:
+        return
+
+    deadline = monotonic_fn() + grace_seconds
+    while alive and monotonic_fn() < deadline:
+        sleep_fn(min(poll_seconds, max(0.0, deadline - monotonic_fn())))
+        still_alive = set()
+        for pid in alive:
+            try:
+                signal_fn(pid, 0)
+                still_alive.add(pid)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                still_alive.add(pid)
+        alive = still_alive
+
+    for pid in alive:
+        try:
+            signal_fn(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if alive:
+        sleep_fn(0.1)
+
+
 def delete_app(app_path, config):
     cleanup, hooks = app_cleanup_config(config)
     restore_source = get_restore_source(config, app_path)
@@ -872,13 +975,7 @@ def delete_app(app_path, config):
         notify_user("Idle Maintenance", f"Delete refused for {os.path.basename(app_path)}: a before-delete hook vetoed it.")
         return False
 
-    app_name = os.path.basename(app_path)
-    if app_name.endswith(".app"):
-        app_name = app_name[:-4]
-        
-    subprocess.run(["pkill", "-9", "-x", app_name], stderr=subprocess.DEVNULL)
-    subprocess.run(["pkill", "-9", "-f", app_path], stderr=subprocess.DEVNULL)
-    time.sleep(0.5)
+    terminate_app_processes(app_path, cleanup_config=cleanup)
 
     trash_dir = os.path.expanduser("~/.Trash")
     base_name = os.path.basename(app_path)

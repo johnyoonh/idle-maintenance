@@ -124,16 +124,34 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def append_bounded_jsonl(path: Path, record: dict[str, Any], limit: int) -> None:
-    """Append a history record while retaining only the newest bounded set."""
+def append_history_record(path: Path, record: dict[str, Any]) -> None:
+    """Append a history record in bounded O(1) time without reading or rewriting the file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def compact_bounded_jsonl(path: Path, limit: int) -> None:
+    """Compact history file to the newest bounded set atomically."""
+    if not path.exists():
+        return
     rows: list[str] = []
     try:
         rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     except OSError:
-        pass
-    rows.append(json.dumps(record, sort_keys=True, separators=(",", ":")))
-    rows = rows[-max(1, int(limit)):]
-    _atomic_write_text(path, "\n".join(rows) + "\n")
+        return
+    bounded_limit = max(1, int(limit))
+    if len(rows) <= bounded_limit:
+        return
+    compacted = rows[-bounded_limit:]
+    _atomic_write_text(path, "\n".join(compacted) + "\n")
+
+
+def append_bounded_jsonl(path: Path, record: dict[str, Any], limit: int) -> None:
+    """Append a history record and compact retention."""
+    append_history_record(path, record)
+    compact_bounded_jsonl(path, limit)
 
 
 def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float | None:
@@ -360,11 +378,7 @@ class ResourceMonitor:
             "process": incident.get("process"),
             **fields,
         }
-        append_bounded_jsonl(
-            self.history_path,
-            record,
-            int(self.config.get("resource_monitor_history_limit", 500)),
-        )
+        append_history_record(self.history_path, record)
 
     def _incident_by_id(self, incident_id: str) -> dict[str, Any] | None:
         return next((item for item in self.state["incidents"] if item.get("id") == incident_id), None)
@@ -398,6 +412,10 @@ class ResourceMonitor:
         self.state["notifications"] = {
             key: value for key, value in notifications[-100:] if now - value <= cooldown * 2
         }
+        compact_bounded_jsonl(
+            self.history_path,
+            int(self.config.get("resource_monitor_history_limit", 500)),
+        )
 
     def _qualified(self, interval: dict[str, Any]) -> bool:
         total_limit = float(self.config.get("process_high_io_total_mib_per_second", 20))

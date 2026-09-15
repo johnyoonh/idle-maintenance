@@ -393,6 +393,101 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
             self.assertEqual(10, writes[0][1]["health"]["last_sample_at"])
             self.assertEqual(40, writes[1][1]["health"]["last_sample_at"])
 
+    def test_parse_line_handles_executable_paths_with_spaces(self):
+        line = (
+            "1234 1 501 5.2 01:23:45 Mon Sep 14 10:00:00 2026 "
+            "/Applications/Microsoft Edge.app/Contents/Frameworks/Microsoft Edge Framework.framework/Helpers/Microsoft Edge Helper.app/Contents/MacOS/Microsoft Edge Helper "
+            "--type=renderer --field-trial-handle=123"
+        )
+        parsed = identity.parse_line(line)
+        self.assertIsNotNone(parsed)
+        expected_comm = (
+            "/Applications/Microsoft Edge.app/Contents/Frameworks/Microsoft Edge Framework.framework/Helpers/Microsoft Edge Helper.app/Contents/MacOS/Microsoft Edge Helper"
+        )
+        self.assertEqual(parsed["comm"], expected_comm)
+        from process_review import _base_name
+        self.assertEqual(_base_name(parsed), "microsoft edge helper")
+
+    def test_browser_helpers_share_app_level_recurrence_group_and_retain_pid_validation(self):
+        comm = (
+            "/Applications/Microsoft Edge.app/Contents/Frameworks/Microsoft Edge Framework.framework/Helpers/Microsoft Edge Helper.app/Contents/MacOS/Microsoft Edge Helper"
+        )
+        first = proc(
+            pid=101,
+            command=f"{comm} --type=renderer --field-trial-handle=one",
+            comm=comm,
+            start=100,
+        )
+        second = proc(
+            pid=102,
+            command=f"{comm} --type=renderer --field-trial-handle=two",
+            comm=comm,
+            start=100,
+        )
+
+        guidance1 = known_process_guidance(first)
+        guidance2 = known_process_guidance(second)
+
+        self.assertIsNotNone(guidance1)
+        self.assertIsNotNone(guidance2)
+        # Shared recurrence group
+        self.assertEqual(guidance1["recurrence_group"], "browser:microsoft-edge")
+        self.assertEqual(guidance2["recurrence_group"], "browser:microsoft-edge")
+
+        # PID-level revalidation is retained
+        self.assertEqual(first["pid"], 101)
+        self.assertEqual(second["pid"], 102)
+        self.assertFalse(identity.same(first, second))
+
+    def test_browser_helpers_share_notification_cooldown_in_monitor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = []
+            config = {
+                "process_high_io_total_mib_per_second": 20,
+                "process_high_io_write_mib_per_second": 10,
+                "process_io_minimum_window_mib": 256,
+                "process_io_required_intervals": 2,
+                "system_disk_busy_mib_per_second": 50,
+                "resource_monitor_interval_seconds": 10,
+                "resource_monitor_notification_cooldown_seconds": 3600,
+                "resource_monitor_known_notification_cooldown_seconds": 3600,
+            }
+            monitor = ResourceMonitor(
+                config,
+                state_path=Path(directory) / "state.json",
+                history_path=Path(directory) / "history.jsonl",
+                now_fn=lambda: 1000,
+                notify_fn=lambda title, message: notifications.append((title, message)),
+                identity_reader=lambda _pid: None,
+            )
+            comm = (
+                "/Applications/Microsoft Edge.app/Contents/Frameworks/Microsoft Edge Framework.framework/Helpers/Microsoft Edge Helper.app/Contents/MacOS/Microsoft Edge Helper"
+            )
+            status_hot = {"available": True, "mib_per_second": 80, "error": ""}
+
+            # Helper 1 (PID 101) triggers extreme I/O
+            p1_0 = proc(pid=101, command=f"{comm} --type=renderer --flag=1", comm=comm)
+            p1_1 = proc(pid=101, command=f"{comm} --type=renderer --flag=1", comm=comm, read=500 * MIB, write=500 * MIB)
+            p1_2 = proc(pid=101, command=f"{comm} --type=renderer --flag=1", comm=comm, read=1000 * MIB, write=1000 * MIB)
+
+            monitor.observe({101: p1_0}, {101: p1_1}, status_hot, seconds=10, now=1010)
+            monitor.observe({101: p1_1}, {101: p1_2}, status_hot, seconds=10, now=1020)
+
+            # Notification emitted for the group
+            self.assertEqual(len(notifications), 1)
+            self.assertIn("group:browser:microsoft-edge", monitor.state["notifications"])
+
+            # Helper 2 (PID 102) also triggers extreme I/O within the cooldown period
+            p2_0 = proc(pid=102, command=f"{comm} --type=renderer --flag=2", comm=comm)
+            p2_1 = proc(pid=102, command=f"{comm} --type=renderer --flag=2", comm=comm, read=500 * MIB, write=500 * MIB)
+            p2_2 = proc(pid=102, command=f"{comm} --type=renderer --flag=2", comm=comm, read=1000 * MIB, write=1000 * MIB)
+
+            monitor.observe({101: p1_2, 102: p2_0}, {101: p1_2, 102: p2_1}, status_hot, seconds=10, now=1030)
+            monitor.observe({101: p1_2, 102: p2_1}, {101: p1_2, 102: p2_2}, status_hot, seconds=10, now=1040)
+
+            # Notification count should STILL be 1 because helpers share group:browser:microsoft-edge!
+            self.assertEqual(len(notifications), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

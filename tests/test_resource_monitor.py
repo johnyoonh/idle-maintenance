@@ -10,7 +10,15 @@ from unittest.mock import Mock, patch
 import maintenance_status
 import process_identity as identity
 from process_review import ATTRIBUTION_NOTE, investigation_prompt, process_action_policy, terminate
-from resource_monitor import MIB, ResourceMonitor, append_bounded_jsonl, process_instance_id, rolling_delta
+from resource_monitor import (
+    MIB,
+    ResourceMonitor,
+    append_bounded_jsonl,
+    append_history_record,
+    compact_bounded_jsonl,
+    process_instance_id,
+    rolling_delta,
+)
 
 
 def proc(pid=42, *, read=0, write=0, start=100, command="/usr/bin/sample --work", comm="/usr/bin/sample"):
@@ -314,6 +322,44 @@ class ResourceMonitorTests(unittest.TestCase):
         ]
         self.monitor._prune(self.clock)
         self.assertEqual([item["id"] for item in self.monitor.state["incidents"]], ["6", "7", "8", "9"])
+
+    def test_history_burst_does_not_scale_with_history_size_and_compacts_in_prune(self):
+        # Prepopulate history with 1000 records
+        large_count = 1000
+        for i in range(large_count):
+            append_history_record(self.history, {"pre_existing": i})
+        self.assertEqual(len(self.history.read_text().splitlines()), large_count)
+
+        # Count file rewrites during a sampling burst of incident history events
+        burst_incidents = [
+            {
+                "id": f"burst-{i}",
+                "process_identity": f"proc-{i}",
+                "pid": 1000 + i,
+                "process": "test",
+            }
+            for i in range(20)
+        ]
+
+        # Emitting burst incident events directly appends in bounded O(1) time
+        # without reading or rewriting the existing 1000 records
+        with patch("resource_monitor.compact_bounded_jsonl") as mock_compact:
+            for inc in burst_incidents:
+                self.monitor._history("opened", inc)
+            # compact_bounded_jsonl was NOT called on the hot path
+            mock_compact.assert_not_called()
+
+        # All 20 burst events were appended
+        lines = self.history.read_text().splitlines()
+        self.assertEqual(len(lines), large_count + 20)
+
+        # Compaction occurs outside per-incident handling during _prune
+        self.monitor.config["resource_monitor_history_limit"] = 50
+        self.monitor._prune(self.clock)
+        compacted_lines = self.history.read_text().splitlines()
+        self.assertEqual(len(compacted_lines), 50)
+        last_record = json.loads(compacted_lines[-1])
+        self.assertEqual(last_record["incident_id"], "burst-19")
 
     def test_legacy_persisted_windows_are_discarded_and_compacted(self):
         legacy_state = {

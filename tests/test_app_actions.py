@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -142,6 +143,94 @@ class AppActionWorkerTests(unittest.TestCase):
             self.assertEqual(jobs["old-running"]["state"], "failed")
             self.assertIn("not retried", jobs["old-running"]["error"])
             self.assertEqual(jobs["pending"]["state"], "completed")
+
+    def test_lost_wakeup_race_closed_during_worker_exit_and_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path, state_lock, worker_lock = self.paths(Path(tmp))
+            app_actions.enqueue_trash_action(
+                "/Applications/First.app",
+                state_path=state_path,
+                lock_path=state_lock,
+                now=1,
+                job_id="job-1",
+            )
+            processed = []
+
+            original_claim = app_actions._claim_next_job
+            first_empty_observed = [False]
+
+            def hook_claim(**kwargs):
+                claimed = original_claim(**kwargs)
+                if claimed is None and not first_empty_observed[0]:
+                    first_empty_observed[0] = True
+                    app_actions.enqueue_trash_action(
+                        "/Applications/Second.app",
+                        state_path=state_path,
+                        lock_path=state_lock,
+                        now=2,
+                        job_id="job-2",
+                    )
+                return claimed
+
+            with patch("app_actions._claim_next_job", side_effect=hook_claim):
+                app_actions.run_worker(
+                    state_path=state_path,
+                    state_lock_path=state_lock,
+                    worker_lock_path=worker_lock,
+                    execute=lambda job: processed.append(job["id"]) or {"state": "completed", "result": {"outcome": "trashed"}},
+                    now_fn=lambda: 100,
+                )
+
+            # Successor worker runs (as detached by launch_worker)
+            app_actions.run_worker(
+                state_path=state_path,
+                state_lock_path=state_lock,
+                worker_lock_path=worker_lock,
+                execute=lambda job: processed.append(job["id"]) or {"state": "completed", "result": {"outcome": "trashed"}},
+                now_fn=lambda: 101,
+            )
+
+            self.assertIn("job-1", processed)
+            self.assertIn("job-2", processed)
+            status = app_actions.app_action_status(state_path=state_path, lock_path=state_lock, now=102)
+            self.assertEqual(status["queued"], 0, "No jobs should remain pending/lost")
+
+    def test_successor_worker_retries_and_claims_after_lock_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path, state_lock, worker_lock = self.paths(Path(tmp))
+            app_actions.enqueue_trash_action(
+                "/Applications/Pending.app",
+                state_path=state_path,
+                lock_path=state_lock,
+                now=1,
+                job_id="job-handoff",
+            )
+            processed = []
+
+            # Hold worker lock externally to simulate Worker 1 finishing
+            with open(worker_lock, "a+", encoding="utf-8") as held_lock:
+                fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX)
+
+                sleep_count = [0]
+                def fake_sleep(duration):
+                    sleep_count[0] += 1
+                    if sleep_count[0] >= 2:
+                        fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+
+                app_actions.run_worker(
+                    state_path=state_path,
+                    state_lock_path=state_lock,
+                    worker_lock_path=worker_lock,
+                    execute=lambda job: processed.append(job["id"]) or {"state": "completed", "result": {"outcome": "trashed"}},
+                    now_fn=lambda: 100,
+                    retries=5,
+                    retry_delay=0.01,
+                    sleep_fn=fake_sleep,
+                )
+
+            self.assertEqual(processed, ["job-handoff"])
+            status = app_actions.app_action_status(state_path=state_path, lock_path=state_lock, now=101)
+            self.assertEqual(status["queued"], 0)
 
     def test_failed_job_is_retained_and_not_automatically_retried(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -295,6 +384,64 @@ class DeleteCompatibilityTests(unittest.TestCase):
         source = Path(maintenance_core.__file__).read_text(encoding="utf-8")
         self.assertNotIn('tell application "Finder"', source)
         self.assertNotIn("trash_with_finder", source)
+
+    def test_delete_app_does_not_use_broad_pkill(self):
+        source = Path(maintenance_core.__file__).read_text(encoding="utf-8")
+        # Ensure delete_app does not run broad pkill
+        self.assertNotIn('subprocess.run(["pkill"', source)
+
+    def test_terminate_app_processes_app_identity_scoped_and_fallback(self):
+        app_path = "/Applications/Demo.app"
+        fake_ps_output = (
+            "101 /Applications/Demo.app/Contents/MacOS/Demo\n"
+            "102 /Applications/Demo.app/Contents/Frameworks/Demo Helper.app/Contents/MacOS/Demo Helper\n"
+            "201 /usr/local/bin/Demo\n"
+            "202 /usr/bin/python3 /tmp/scripts/watch.py /Applications/Demo.app\n"
+            "203 /usr/bin/vim /Applications/Demo.app/Contents/Info.plist\n"
+        )
+        signals_sent = []
+        alive_pids = {101, 102, 201, 202, 203}
+
+        def fake_signal(pid, sig):
+            signals_sent.append((pid, sig))
+            if sig == signal.SIGTERM:
+                # 101 terminates on SIGTERM, 102 ignores SIGTERM
+                if pid == 101:
+                    alive_pids.discard(101)
+            elif sig == signal.SIGKILL:
+                alive_pids.discard(pid)
+            elif sig == 0:
+                if pid not in alive_pids:
+                    raise ProcessLookupError()
+
+        current_time = [0.0]
+
+        def fake_monotonic():
+            return current_time[0]
+
+        def fake_sleep(duration):
+            current_time[0] += duration
+
+        maintenance_core.terminate_app_processes(
+            app_path,
+            cleanup_config={"terminate_grace_seconds": 1.0, "terminate_poll_seconds": 0.1},
+            ps_runner=lambda: fake_ps_output,
+            signal_fn=fake_signal,
+            sleep_fn=fake_sleep,
+            monotonic_fn=fake_monotonic,
+        )
+
+        # 101 should receive SIGTERM and not SIGKILL
+        self.assertIn((101, signal.SIGTERM), signals_sent)
+        self.assertNotIn((101, signal.SIGKILL), signals_sent)
+
+        # 102 should receive SIGTERM and fallback to SIGKILL
+        self.assertIn((102, signal.SIGTERM), signals_sent)
+        self.assertIn((102, signal.SIGKILL), signals_sent)
+
+        # Unrelated processes (201, 202, 203) must NEVER receive any signal
+        unrelated_signals = [item for item in signals_sent if item[0] in {201, 202, 203}]
+        self.assertEqual(unrelated_signals, [], "Unrelated processes must remain untouched")
 
 
 if __name__ == "__main__":
