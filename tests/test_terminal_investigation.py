@@ -53,6 +53,107 @@ class TerminalInvestigationTests(unittest.TestCase):
 
         self.assertEqual(run.call_args.args[0][0], "osascript")
 
+    def test_actionable_notification_success_delivers_and_logs(self):
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        history = Path("/tmp/synthetic resource history.jsonl")
+
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value="/test/terminal-notifier"),
+            patch("maintenance_core.subprocess.run", return_value=completed) as run,
+            patch("maintenance_core.log") as log_mock,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path=history,
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][0], "/test/terminal-notifier")
+        log_mock.assert_called_once_with("Actionable notification delivered.")
+
+    def test_actionable_notification_missing_notifier_falls_back_to_applescript(self):
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value=None),
+            patch("maintenance_core.subprocess.run") as run,
+            patch("maintenance_core.log") as log_mock,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path="/tmp/resource-monitor-history.jsonl",
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][0], "osascript")
+        log_mock.assert_not_called()
+
+    def test_actionable_notification_definite_predelivery_failure_falls_back_to_applescript(self):
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "/test/terminal-notifier":
+                raise FileNotFoundError(2, "No such file or directory")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value="/test/terminal-notifier"),
+            patch("maintenance_core.subprocess.run", side_effect=fake_run) as run,
+            patch("maintenance_core.log") as log_mock,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path="/tmp/resource-monitor-history.jsonl",
+            )
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][0], "/test/terminal-notifier")
+        self.assertEqual(run.call_args_list[1].args[0][0], "osascript")
+        self.assertTrue(
+            any("failed before delivery" in call.args[0] for call in log_mock.call_args_list)
+        )
+
+    def test_actionable_notification_timeout_is_uncertain_and_suppresses_fallback(self):
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value="/test/terminal-notifier"),
+            patch(
+                "maintenance_core.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd=["/test/terminal-notifier"], timeout=5),
+            ) as run,
+            patch("maintenance_core.log") as log_mock,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path="/tmp/resource-monitor-history.jsonl",
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][0], "/test/terminal-notifier")
+        self.assertTrue(
+            any("delivery uncertain" in call.args[0] for call in log_mock.call_args_list)
+        )
+
+    def test_actionable_notification_nonzero_exit_suppresses_fallback(self):
+        completed = SimpleNamespace(returncode=1, stdout="", stderr="terminal-notifier execution error")
+
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value="/test/terminal-notifier"),
+            patch("maintenance_core.subprocess.run", return_value=completed) as run,
+            patch("maintenance_core.log") as log_mock,
+        ):
+            maintenance_core.notify_user(
+                "Idle Maintenance resource incident",
+                "sample sustained 25 MiB/s",
+                click_path="/tmp/resource-monitor-history.jsonl",
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][0], "/test/terminal-notifier")
+        self.assertTrue(
+            any("failed" in call.args[0] and "terminal-notifier execution error" in call.args[0] for call in log_mock.call_args_list)
+        )
+
+
     def test_launch_file_is_private_self_deleting_and_shell_quoted(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(

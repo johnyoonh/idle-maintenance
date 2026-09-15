@@ -58,7 +58,7 @@ Suppression means “record the understood isolated case without interrupting th
 
 ## Notifications and review timing
 
-- On systems with `terminal-notifier`, clicking **Show** opens `resource-monitor-history.jsonl` in VS Code when available, then falls back to the default macOS text editor. The AppleScript fallback remains available when that helper is not installed, but cannot attach a click destination.
+- On systems with `terminal-notifier`, clicking **Show** opens `resource-monitor-history.jsonl` in VS Code when available, then falls back to the default macOS text editor. The AppleScript fallback is used only when `terminal-notifier` is missing or fails before delivery (such as an execution error); timeouts and ambiguous delivery attempts never fall back to AppleScript, guaranteeing at most one visible alert per incident.
 - **Investigate** opens Codex directly in a new iTerm or Terminal tab. The generated launch file clears inherited tmux context and disables shell auto-attach hooks before interactive startup, so this flow never joins or creates a tmux session.
 - Each process identity receives at most one notification every six hours when review is warranted.
 - Every non-suppressed incident, including a recurrence, is queued instead of opening a review window immediately.
