@@ -545,17 +545,20 @@ class ResourceMonitor:
         last_value = self.state["notifications"].get(notification_key)
         last_notified = float(last_value) if last_value is not None else None
         if last_notified is None or now - last_notified >= cooldown:
+            rate_detail = f"{incident['peak_total_mib_s']:.1f} MiB/s"
+            if incident.get("peak_write_mib_s", 0) > 0:
+                rate_detail += f" (write {incident['peak_write_mib_s']:.1f} MiB/s)"
             if guidance:
-                title = "Idle Maintenance background activity needs review"
+                title = "IM review"
                 message = (
-                    f"{incident['process']} matches {guidance['role']} and sustained "
-                    f"{incident['peak_total_mib_s']:.1f} MiB/s. {resource_triage['reason']} "
+                    f"{incident['process']} ({guidance['role']}) sustained "
+                    f"{rate_detail}. {resource_triage['reason']} "
                     f"Default: {guidance['default_action']}"
                 )
             else:
-                title = "Idle Maintenance resource incident"
+                title = "IM incident"
                 message = (
-                    f"{incident['process']} sustained {incident['peak_total_mib_s']:.1f} MiB/s. "
+                    f"{incident['process']} sustained {rate_detail}. "
                     f"{ATTRIBUTION_NOTE}"
                 )
             self.notify_fn(title, message)

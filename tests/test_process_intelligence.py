@@ -299,7 +299,7 @@ class SmartProcessIntelligenceTests(unittest.TestCase):
             self.assertEqual("queued", incident["prompt_status"])
             self.assertEqual([incident["id"]], monitor.state["pending_prompts"])
             self.assertEqual(1, len(notifications))
-            self.assertIn("needs review", notifications[0][0])
+            self.assertEqual("IM review", notifications[0][0])
 
     def test_cool_monitor_iteration_skips_process_snapshot_but_polls_idle(self):
         with tempfile.TemporaryDirectory() as directory:

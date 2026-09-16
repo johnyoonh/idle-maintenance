@@ -77,7 +77,7 @@ def notify_user(title, message, *, click_path=None):
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=5,
+                    timeout=15,
                     check=False,
                 )
                 if result.returncode == 0:
@@ -87,7 +87,7 @@ def notify_user(title, message, *, click_path=None):
                 log(f"Actionable notification failed: {detail or f'exit {result.returncode}'}")
                 return
             except subprocess.TimeoutExpired as error:
-                log(f"Actionable notification delivery uncertain: timed out after {getattr(error, 'timeout', 5)}s")
+                log(f"Actionable notification delivery uncertain: timed out after {getattr(error, 'timeout', 15)}s")
                 return
             except OSError as error:
                 log(f"Actionable notification failed before delivery: {getattr(error, 'strerror', None) or error}")

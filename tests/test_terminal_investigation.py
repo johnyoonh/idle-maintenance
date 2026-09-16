@@ -117,7 +117,7 @@ class TerminalInvestigationTests(unittest.TestCase):
             patch("maintenance_core._terminal_notifier_path", return_value="/test/terminal-notifier"),
             patch(
                 "maintenance_core.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd=["/test/terminal-notifier"], timeout=5),
+                side_effect=subprocess.TimeoutExpired(cmd=["/test/terminal-notifier"], timeout=15),
             ) as run,
             patch("maintenance_core.log") as log_mock,
         ):

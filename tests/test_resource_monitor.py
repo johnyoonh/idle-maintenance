@@ -101,10 +101,10 @@ class ResourceMonitorTests(unittest.TestCase):
         )
 
         with patch("maintenance_core.notify_user") as notify:
-            monitor._notify_default("Idle Maintenance resource incident", "synthetic incident")
+            monitor._notify_default("IM incident", "synthetic incident")
 
         notify.assert_called_once_with(
-            "Idle Maintenance resource incident",
+            "IM incident",
             "synthetic incident",
             click_path=self.history,
         )
