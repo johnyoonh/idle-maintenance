@@ -185,6 +185,34 @@ class ShortcutReviewTests(unittest.TestCase):
             self.assertEqual(calls, [["keyboard-refresh"], ["keyboard-popup"]])
             self.assertEqual(sleeps, [30, 30])
 
+    def test_automatic_popup_honors_configured_maximum_idle_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            samples = iter([901, 0, 299, 300])
+            sleeps = []
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            result = run_shortcut_review(
+                {
+                    "return_flashcard_refresh_command": ["keyboard-refresh"],
+                    "return_shortcut_popup_command": ["keyboard-popup"],
+                    "review_prompt_idle_max_seconds": 900,
+                },
+                automatic=True,
+                runner=runner,
+                idle_provider=lambda: next(samples),
+                sleep_fn=sleeps.append,
+                state_path=Path(directory) / "state.json",
+                now=datetime(2026, 9, 10, 8, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(result and result["ok"])
+            self.assertEqual(calls, [["keyboard-refresh"], ["keyboard-popup"]])
+            self.assertEqual(sleeps, [30, 30, 30])
+
     def test_maint_shortcuts_json_uses_canonical_workflow(self):
         result = {"ok": True, "failed_step": None, "error": "", "steps": []}
         output = io.StringIO()

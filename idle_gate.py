@@ -46,15 +46,15 @@ def idle_window_contains(
 def wait_until_idle(
     minimum_seconds: float,
     *,
+    maximum_seconds: float = 0,
     idle_provider: Callable[[], float | None] = read_idle_seconds,
     poll_interval: float = 30,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> float:
-    """Wait for a known HID sample to meet the idle threshold and return it."""
-    threshold = max(0.0, float(minimum_seconds))
+    """Wait for a known HID sample to meet the configured idle window."""
     delay = max(1.0, float(poll_interval))
     while True:
         idle_seconds = idle_provider()
-        if idle_seconds is not None and float(idle_seconds) >= threshold:
+        if idle_window_contains(idle_seconds, minimum_seconds, maximum_seconds):
             return float(idle_seconds)
         sleep_fn(delay)

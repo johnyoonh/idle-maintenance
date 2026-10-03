@@ -10,6 +10,7 @@ REQUIRED = (
     "prompt_session.py",
     "review_ui.py",
     "resource_monitor.py",
+    "idle_gate.py",
 )
 
 
@@ -19,3 +20,4 @@ def test_review_runtime_is_packaged_for_app_and_script_deployments():
     for filename in REQUIRED:
         assert filename in app_build
         assert filename in script_deploy
+    assert "idle_gate.py" in (ROOT / "build_app_core.sh").read_text(encoding="utf-8")

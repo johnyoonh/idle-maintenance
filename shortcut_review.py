@@ -243,6 +243,7 @@ def _run_provider(
             try:
                 wait_until_idle(
                     minimum_idle,
+                    maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
                     idle_provider=idle_provider,
                     poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
                     sleep_fn=sleep_fn,
