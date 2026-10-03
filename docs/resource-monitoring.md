@@ -62,11 +62,11 @@ Suppression means “record the understood isolated case without interrupting th
 - **Investigate** opens Codex directly in a new iTerm or Terminal tab. The generated launch file clears inherited tmux context and disables shell auto-attach hooks before interactive startup, so this flow never joins or creates a tmux session.
 - Each process identity receives at most one notification every six hours when review is warranted.
 - Every non-suppressed incident, including a recurrence, is queued instead of opening a review window immediately.
-- A queued review opens only from a fresh HID-idle sample between 30 seconds and 5 minutes. Active input and extended away time keep it queued, and only one review can open per fresh sample.
+- A queued review opens only when a fresh HID sample reports at least 5 minutes without input. There is no upper idle limit by default. The monitor reads HID again just before opening the review; active input or an unavailable reading leaves the incident queued. Only one review can open per fresh sample.
 - Recovered incidents are removed from the queue and revalidated again before delivery, so a settled or replaced process cannot produce a stale popup.
 - Historical and suppressed incidents remain in the incident ledger and JSONL history even after the live process queue changes.
 
-The popup window can be tuned with `review_prompt_idle_seconds` and `review_prompt_idle_max_seconds`. The same gate defers the automatic away-return maintenance review until interaction becomes quiet; resume detection itself remains armed while the user is active. The monitor reuses its existing 30-second HID poll, so the gate adds no keyboard hook, event tap, or per-keypress processing.
+The idle threshold can be tuned with `review_prompt_idle_seconds`; `review_prompt_idle_max_seconds` defaults to `0` for no upper limit. The same gate defers the automatic away-return maintenance review until interaction has been quiet for at least 5 minutes. It checks again immediately before launching the review. Resume detection itself remains armed while the user is active. The monitor reuses its existing 30-second HID poll, so the gate adds no keyboard hook, event tap, or per-keypress processing.
 
 State is written atomically under `$HOME/Library/Application Support/idle-maintenance/` with heartbeat writes throttled to a bounded cadence while lifecycle changes persist immediately:
 

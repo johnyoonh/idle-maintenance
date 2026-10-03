@@ -9,7 +9,7 @@ The menu-bar app exposes:
 - **Review Recent I/O Incidents…** — opens maintenance status with monitor health, queued prompts, and recent incidents.
 - **Sample CPU + Disk I/O (1 min)** — runs the existing manual process audit, which samples both sustained CPU and process I/O.
 
-The resident resource monitor sends a notification when a qualifying incident opens. Every non-suppressed incident is queued, including a recurrence, and its review window can open only after a fresh HID sample reports 30 seconds to 5 minutes of quiet input. Notification delivery is deduplicated per process identity for six hours.
+The resident resource monitor sends a notification when a qualifying incident opens. Every non-suppressed incident is queued, including a recurrence, and its review window can open only after a fresh HID sample reports at least 5 minutes without input. There is no upper limit by default, and activity is checked again just before the window opens. Notification delivery is deduplicated per process identity for six hours.
 
 A queued process window is skipped if the process exits or its identity changes before review. The absence of a return-time window therefore does not prove that no incident was recorded; use `maint status` to inspect recent history.
 
@@ -53,7 +53,7 @@ decision; it never deletes an Apple Shortcut.
 
 ## Automatic away-return review
 
-The resident resource monitor is the authoritative return detector. It polls HID idle time even when no process incident is queued, so automatic resume routing does not depend on the legacy `idle_watcher.py` process being enabled. A return is recorded immediately, but the review and resume handoff wait until HID input has been quiet for 30 seconds; they do not open while the user is actively typing or moving the pointer.
+The resident resource monitor is the authoritative return detector. It polls HID idle time even when no process incident is queued, so automatic resume routing does not depend on the legacy `idle_watcher.py` process being enabled. A return is recorded immediately, but the review and resume handoff wait until HID input has been quiet for at least 5 minutes. The idle sample is checked again just before the maintenance window opens; if activity resumes, the return remains pending.
 
 Default policy:
 
@@ -61,7 +61,7 @@ Default policy:
 - consider the user returned when idle falls below 30 seconds;
 - require one hour between resume-flow triggers;
 - treat failed HID-idle reads as unknown instead of a synthetic return;
-- keep the stricter 15-minute threshold for queued resource-incident prompts;
+- require 5 minutes without input before presenting queued resource-incident prompts;
 - deliver any armed resource prompt before the general interactive maintenance review;
 - run interactive app/process maintenance;
 - invoke `open hammerspoon://resumerouter` (or its configured fallback);
@@ -83,6 +83,13 @@ cards are available immediately. Set `return_obsidian_command` or
 `return_obsidian_srs_command` to an empty value to omit that command; the
 shortcuts provider remains independently controlled by
 `show_shortcuts_on_finish`.
+
+Automatic shortcut reviews wait until HID input has again been quiet for at
+least 5 minutes after the interactive review closes. The keyboard popup command
+has a 10-minute timeout (`shortcut_popup_timeout_seconds`); a timeout is
+reported as an uncertain display and does not update provider rotation state
+or immediately launch another provider. Manual shortcut review commands remain
+immediate.
 
 ## Legacy watcher
 

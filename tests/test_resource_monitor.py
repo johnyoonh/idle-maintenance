@@ -75,6 +75,7 @@ class ResourceMonitorTests(unittest.TestCase):
             notify_fn=lambda title, message: self.notifications.append((title, message)),
             prompt_fn=lambda process, incident: self.prompts.append((process, incident)) or "KEEP",
             identity_reader=lambda _pid: self.current,
+            idle_provider=lambda: 30,
         )
 
     def tearDown(self):
@@ -171,6 +172,27 @@ class ResourceMonitorTests(unittest.TestCase):
         self.assertEqual("synthetic prompt failure", incident["prompt_error"])
         self.assertEqual("synthetic prompt failure", self.monitor.state["prompt_health"]["last_error"])
         self.assertEqual([], self.monitor.state["pending_prompts"])
+
+    def test_active_input_at_presentation_time_keeps_incident_queued(self):
+        incident = {
+            "id": "idle-recheck",
+            "pid": 42,
+            "process": "sample",
+            "process_identity": process_instance_id(self.current),
+            "process_snapshot": self.current,
+            "prompt_status": "queued",
+        }
+        self.monitor.config["review_prompt_idle_seconds"] = 300
+        self.monitor.config["review_prompt_idle_max_seconds"] = 0
+        self.monitor.state["incidents"] = [incident]
+        self.monitor.state["pending_prompts"] = [incident["id"]]
+        self.monitor.idle_provider = lambda: 0
+
+        self.monitor._deliver_prompt(incident, self.clock)
+
+        self.assertEqual([], self.prompts)
+        self.assertEqual("queued", incident["prompt_status"])
+        self.assertEqual([incident["id"]], self.monitor.state["pending_prompts"])
 
     def cool_and_recover(self, previous, samples=6):
         current = previous
