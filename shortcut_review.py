@@ -7,9 +7,12 @@ import json
 import os
 import shlex
 import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+from idle_gate import read_idle_seconds, wait_until_idle
 
 RunFn = Callable[..., subprocess.CompletedProcess[str]]
 PROVIDERS = ("keyboard", "apple")
@@ -180,6 +183,9 @@ def _run_provider(
     runner: RunFn,
     home: Path,
     require_candidates: bool,
+    automatic: bool,
+    idle_provider: Callable[[], float | None],
+    sleep_fn: Callable[[float], None],
 ) -> dict[str, Any]:
     refresh, popup = _provider_commands(config, provider, home)
     if not refresh:
@@ -229,8 +235,61 @@ def _run_provider(
                     }
 
     for name, command in (("refresh", refresh), ("popup", popup)):
+        if automatic and name == "popup":
+            minimum_idle = max(
+                max(0.0, float(config.get("return_active_cutoff_seconds", 30))),
+                float(config.get("review_prompt_idle_seconds", 300)),
+            )
+            try:
+                wait_until_idle(
+                    minimum_idle,
+                    maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
+                    idle_provider=idle_provider,
+                    poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
+                    sleep_fn=sleep_fn,
+                )
+            except (OSError, ValueError, TypeError) as error:
+                detail = str(error).strip() or type(error).__name__
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "failed_step": "idle-gate",
+                    "error": detail,
+                    "steps": steps,
+                    "browser_audit": browser_audit,
+                }
+        run_kwargs = {"capture_output": True, "text": True, "check": False}
+        if provider == "keyboard" and name == "popup":
+            run_kwargs["timeout"] = max(
+                0.1, float(config.get("shortcut_popup_timeout_seconds", 10 * 60))
+            )
         try:
-            completed = runner(command, capture_output=True, text=True, check=False)
+            completed = runner(command, **run_kwargs)
+        except subprocess.TimeoutExpired as error:
+            timed_out = provider == "keyboard" and name == "popup"
+            timeout = float(run_kwargs.get("timeout", error.timeout or 0))
+            detail = (
+                f"Keyboard shortcut popup timed out after {timeout:g} seconds; display may be uncertain."
+                if timed_out
+                else str(error)
+            )
+            steps.append({
+                "name": name,
+                "command": command,
+                "returncode": 124,
+                "stdout": "",
+                "stderr": detail,
+                "timed_out": timed_out,
+            })
+            return {
+                "ok": False,
+                "provider": provider,
+                "failed_step": name,
+                "error": detail,
+                "steps": steps,
+                "browser_audit": browser_audit,
+                "timed_out": timed_out,
+            }
         except (OSError, subprocess.SubprocessError) as error:
             steps.append({"name": name, "command": command, "returncode": 126, "stdout": "", "stderr": str(error)})
             return {"ok": False, "provider": provider, "failed_step": name, "error": str(error), "steps": steps, "browser_audit": browser_audit}
@@ -259,6 +318,8 @@ def run_shortcut_review(
     home: Path | None = None,
     now: datetime | None = None,
     state_path: Path | None = None,
+    idle_provider: Callable[[], float | None] = read_idle_seconds,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Open an explicit provider or the least-recently successful provider."""
     if config is None:
@@ -293,8 +354,20 @@ def run_shortcut_review(
     order = [provider] if explicit else sorted(PROVIDERS, key=lambda name: (_last_shown(state, name), PROVIDERS.index(name)))
     attempts: list[dict[str, Any]] = []
     for candidate in order:
-        result = _run_provider(candidate, config, runner=runner, home=root, require_candidates=not explicit)
+        result = _run_provider(
+            candidate,
+            config,
+            runner=runner,
+            home=root,
+            require_candidates=not explicit,
+            automatic=automatic,
+            idle_provider=idle_provider,
+            sleep_fn=sleep_fn,
+        )
         attempts.append(result)
+        if result.get("timed_out"):
+            result["attempts"] = attempts
+            return result
         if result.get("ok") and not result.get("skipped"):
             state.setdefault("providers", {}).setdefault(candidate, {})["lastShownAt"] = timestamp.isoformat()
             history.append(timestamp)
@@ -338,6 +411,8 @@ def render_result(result: dict[str, Any]) -> str:
     detail = str(result.get("error") or "unknown error")
     if step == "refresh":
         return f"Shortcut content refresh failed; review popup was not opened: {detail}"
+    if step == "idle-gate":
+        return f"Shortcut review deferred because idle status could not be checked: {detail}"
     return f"Shortcut review failed: {detail}"
 
 

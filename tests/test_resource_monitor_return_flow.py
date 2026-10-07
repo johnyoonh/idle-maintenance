@@ -36,6 +36,7 @@ class ReturnFlowTests(unittest.TestCase):
             history_path=self.root / "history.jsonl",
             notify_fn=lambda *_args: None,
             return_fn=lambda: self.events.append("return") or {"ok": True},
+            idle_provider=lambda: 30,
         )
 
     def tearDown(self):
@@ -187,6 +188,19 @@ class ReturnFlowTests(unittest.TestCase):
             "HID idle time unavailable",
         )
 
+    def test_activity_at_return_presentation_time_keeps_return_pending(self):
+        self.monitor.config["review_prompt_idle_seconds"] = 300
+        self.monitor.config["review_prompt_idle_max_seconds"] = 0
+        self.observe(idle=601, now=8_100)
+        self.observe(idle=0, now=8_110)
+
+        self.monitor.idle_provider = lambda: 0
+        self.observe(idle=300, now=8_140)
+
+        self.assertEqual([], self.events)
+        self.assertTrue(self.monitor.state["return_pending"])
+        self.assertEqual(0.0, self.monitor.state["last_return_flow_at"])
+
     def test_disabled_return_routing_never_arms_or_launches(self):
         self.monitor.config["return_routing_enabled"] = False
         self.observe(idle=601, now=8_200)
@@ -197,6 +211,7 @@ class ReturnFlowTests(unittest.TestCase):
 
     def test_active_cutoff_is_configurable(self):
         self.monitor.config["return_active_cutoff_seconds"] = 45
+        self.monitor.idle_provider = lambda: 45
         self.observe(idle=601, now=8_300)
         self.observe(idle=40, now=8_310)
         self.assertEqual(self.events, [])

@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime
 
 from idle_config import DEFAULT_CONFIG, is_terminal_suggestion_time, next_keep_delay_days
+from idle_gate import idle_window_contains
 
 
 class IdleConfigTests(unittest.TestCase):
@@ -56,6 +57,15 @@ class IdleConfigTests(unittest.TestCase):
         self.assertIn("kb browser audit", command)
         self.assertIn("--refresh", command)
         self.assertIn("--json", command)
+
+    def test_automatic_review_waits_five_minutes_without_an_idle_cap(self):
+        minimum = DEFAULT_CONFIG["review_prompt_idle_seconds"]
+        maximum = DEFAULT_CONFIG["review_prompt_idle_max_seconds"]
+
+        self.assertFalse(idle_window_contains(299, minimum, maximum))
+        self.assertTrue(idle_window_contains(300, minimum, maximum))
+        self.assertTrue(idle_window_contains(86_400, minimum, maximum))
+        self.assertEqual(DEFAULT_CONFIG["shortcut_popup_timeout_seconds"], 600)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import sys
 import time
 
 from idle_config import APP_SUPPORT_DIR, get_handoff_app, get_handoff_url, load_config
+from idle_gate import idle_window_contains, read_idle_seconds
 from shortcut_review import normalize_command
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,8 +16,7 @@ APP_USAGE_WATCHER_LOCK_FILE = "/tmp/idle_maintenance_app_usage_watcher.lock"
 
 
 def get_idle_time_seconds():
-    cmd = "ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF/1000000000; exit}'"
-    return float(subprocess.check_output(cmd, shell=True).strip())
+    return read_idle_seconds()
 
 
 def review_gate_transition(
@@ -30,12 +30,16 @@ def review_gate_transition(
     review_idle_max_seconds,
 ):
     """Advance the legacy review gate without observing individual input events."""
-    if idle_time > away_seconds:
-        return True, review_pending, False
+    if idle_time is None:
+        return was_idle, review_pending, False
     if was_idle and idle_time < active_cutoff_seconds:
         return False, True, False
-    if review_pending and review_idle_seconds <= idle_time < review_idle_max_seconds:
+    if review_pending and idle_window_contains(
+        idle_time, review_idle_seconds, review_idle_max_seconds
+    ):
         return was_idle, False, True
+    if idle_time > away_seconds:
+        return True, review_pending, False
     return was_idle, review_pending, False
 
 
@@ -245,11 +249,10 @@ def main():
         )
         review_idle_seconds = max(
             active_cutoff_seconds,
-            float(config.get("review_prompt_idle_seconds", 30)),
+            float(config.get("review_prompt_idle_seconds", 300)),
         )
-        review_idle_max_seconds = max(
-            review_idle_seconds,
-            float(config.get("review_prompt_idle_max_seconds", 5 * 60)),
+        review_idle_max_seconds = float(
+            config.get("review_prompt_idle_max_seconds", 0)
         )
 
         # This watcher is opt-in. Starting it intentionally runs one review immediately.

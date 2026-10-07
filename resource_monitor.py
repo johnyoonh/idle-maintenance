@@ -7,7 +7,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import signal
 import tempfile
 import time
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from idle_config import APP_SUPPORT_DIR, atomic_write_json, load_config, sample_disk_activity
+from idle_gate import idle_window_contains, read_idle_seconds
 import process_identity as identity
 from process_triage import triage_process
 
@@ -154,27 +154,6 @@ def append_bounded_jsonl(path: Path, record: dict[str, Any], limit: int) -> None
     compact_bounded_jsonl(path, limit)
 
 
-def read_idle_seconds(command_runner: Callable[..., Any] | None = None) -> float | None:
-    """Read HID idle time without privileges; return unknown when unavailable."""
-    import subprocess
-
-    runner = command_runner or subprocess.run
-    try:
-        result = runner(
-            ["/usr/sbin/ioreg", "-c", "IOHIDSystem", "-d", "4"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    match = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', result.stdout or "")
-    return int(match.group(1)) / 1_000_000_000 if match else None
-
-
 def _known_process_guidance(proc: dict[str, Any]) -> dict[str, Any] | None:
     from process_review import known_process_guidance
 
@@ -195,6 +174,7 @@ class ResourceMonitor:
         prompt_fn: Callable[[dict[str, Any], dict[str, Any]], str] | None = None,
         identity_reader: Callable[[int], dict[str, Any] | None] = identity.read,
         return_fn: Callable[[], Any] | None = None,
+        idle_provider: Callable[[], float | None] = read_idle_seconds,
     ) -> None:
         self.config = config or load_config(os.path.dirname(__file__))
         self.state_path = Path(state_path)
@@ -210,6 +190,7 @@ class ResourceMonitor:
         self.prompt_fn = prompt_fn or self._prompt_default
         self.identity_reader = identity_reader
         self.return_fn = return_fn or self._return_default
+        self.idle_provider = idle_provider
         self.state = _read_json(self.state_path)
         self._windows: dict[str, list[dict[str, Any]]] = {}
         health = self.state.get("health") if isinstance(self.state.get("health"), dict) else {}
@@ -566,7 +547,8 @@ class ResourceMonitor:
             incident["notified_at"] = now
         return incident
 
-    def _deliver_prompt(self, incident: dict[str, Any], now: float) -> None:
+    def _deliver_prompt(self, incident: dict[str, Any], now: float) -> bool:
+        """Deliver a queued prompt only if input is still idle at presentation time."""
         if incident.get("status", "active") != "active":
             incident["prompt_status"] = "cancelled"
             incident["prompted_at"] = now
@@ -591,6 +573,19 @@ class ResourceMonitor:
                         reason="process Leave window is active",
                     )
                 else:
+                    prompt_idle_seconds = max(
+                        max(0.0, float(self.config.get("return_active_cutoff_seconds", 30))),
+                        float(self.config.get("review_prompt_idle_seconds", 300)),
+                    )
+                    prompt_idle_max_seconds = float(
+                        self.config.get("review_prompt_idle_max_seconds", 0)
+                    )
+                    if not idle_window_contains(
+                        self.idle_provider(),
+                        prompt_idle_seconds,
+                        prompt_idle_max_seconds,
+                    ):
+                        return False
                     try:
                         action = self.prompt_fn(current, incident)
                     except Exception as error:
@@ -619,6 +614,7 @@ class ResourceMonitor:
         self.state["pending_prompts"] = [
             value for value in self.state["pending_prompts"] if value != incident["id"]
         ]
+        return True
 
     def _handle_idle_return(self, idle_seconds: float, now: float) -> None:
         active_cutoff = max(
@@ -627,24 +623,25 @@ class ResourceMonitor:
         )
         prompt_idle_seconds = max(
             active_cutoff,
-            float(self.config.get("review_prompt_idle_seconds", 30)),
+            float(self.config.get("review_prompt_idle_seconds", 300)),
         )
-        prompt_idle_max_seconds = max(
-            prompt_idle_seconds,
-            float(self.config.get("review_prompt_idle_max_seconds", 5 * 60)),
+        prompt_idle_max_seconds = float(
+            self.config.get("review_prompt_idle_max_seconds", 0)
         )
         return_threshold = max(
             0.0,
             float(self.config.get("idle_threshold_minutes", 10)),
         ) * 60
 
-        # Review only from a fresh, cached HID sample in a bounded quiet window.
-        # Active input and extended away time both leave the incident queued.
+        # Review only from a fresh HID sample beyond the quiet-input threshold.
+        # Active input and unknown readings leave the incident queued.
         self.state["idle_armed"] = False
         prompt_delivered = False
         if (
             self.state.get("pending_prompts")
-            and prompt_idle_seconds <= idle_seconds < prompt_idle_max_seconds
+            and idle_window_contains(
+                idle_seconds, prompt_idle_seconds, prompt_idle_max_seconds
+            )
         ):
             for incident_id in list(self.state["pending_prompts"]):
                 incident = self._incident_by_id(incident_id)
@@ -654,8 +651,7 @@ class ResourceMonitor:
                 if incident.get("status", "active") != "active":
                     self._deliver_prompt(incident, now)
                     continue
-                self._deliver_prompt(incident, now)
-                prompt_delivered = True
+                prompt_delivered = self._deliver_prompt(incident, now) is not False
                 break
 
         if not bool(self.config.get("return_routing_enabled", True)):
@@ -672,7 +668,9 @@ class ResourceMonitor:
         if (
             not self.state.get("return_pending")
             or prompt_delivered
-            or not (prompt_idle_seconds <= idle_seconds < prompt_idle_max_seconds)
+            or not idle_window_contains(
+                idle_seconds, prompt_idle_seconds, prompt_idle_max_seconds
+            )
         ):
             return
 
@@ -682,6 +680,11 @@ class ResourceMonitor:
         )
         last_triggered = float(self.state.get("last_return_flow_at") or 0)
         if last_triggered and now - last_triggered < cooldown:
+            return
+
+        if not idle_window_contains(
+            self.idle_provider(), prompt_idle_seconds, prompt_idle_max_seconds
+        ):
             return
 
         self.state["return_pending"] = False
@@ -837,17 +840,11 @@ class ResourceMonitor:
                     0.0,
                     float(self.config.get("return_active_cutoff_seconds", 30)),
                 ),
-                float(self.config.get("review_prompt_idle_seconds", 30)),
+                float(self.config.get("review_prompt_idle_seconds", 300)),
             ),
             "prompt_idle_max_seconds": max(
-                max(
-                    max(
-                        0.0,
-                        float(self.config.get("return_active_cutoff_seconds", 30)),
-                    ),
-                    float(self.config.get("review_prompt_idle_seconds", 30)),
-                ),
-                float(self.config.get("review_prompt_idle_max_seconds", 5 * 60)),
+                0.0,
+                float(self.config.get("review_prompt_idle_max_seconds", 0)),
             ),
             "return_routing_enabled": bool(self.config.get("return_routing_enabled", True)),
             "return_active_cutoff_seconds": max(
@@ -920,7 +917,7 @@ def run_monitor(
         signum: signal.signal(signum, request_stop) for signum in (signal.SIGTERM, signal.SIGINT)
     }
     try:
-        monitor = ResourceMonitor(cfg)
+        monitor = ResourceMonitor(cfg, idle_provider=idle_provider)
         provider = snapshot_provider or (lambda: identity.snapshot(cfg))
         disk = disk_provider or (
             lambda seconds: sample_disk_activity(seconds, executable="/usr/sbin/iostat")

@@ -795,6 +795,7 @@ echo -n "APPL????" > "$APP_PATH/Contents/PkgInfo"
 
 cp "$SRC_DIR/app_auditor.py" "$RES_DIR/"
 cp "$SRC_DIR/idle_config.py" "$RES_DIR/"
+cp "$SRC_DIR/idle_gate.py" "$RES_DIR/"
 cp "$SRC_DIR/idle_watcher.py" "$RES_DIR/"
 cp "$SRC_DIR/maintenance_interactive.py" "$RES_DIR/"
 cp "$SRC_DIR/maintenance_status.py" "$RES_DIR/"

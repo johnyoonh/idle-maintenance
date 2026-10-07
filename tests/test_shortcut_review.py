@@ -32,6 +32,7 @@ class ShortcutReviewTests(unittest.TestCase):
             },
             runner=runner,
             provider="keyboard",
+            idle_provider=lambda: self.fail("manual reviews must not wait for idle"),
             state_path=Path(tempfile.mkdtemp()) / "state.json",
         )
         self.assertTrue(result["ok"])
@@ -114,6 +115,104 @@ class ShortcutReviewTests(unittest.TestCase):
         self.assertEqual(result["failed_step"], "refresh")
         self.assertEqual(calls, [["kb", "export-srs"]])
 
+    def test_timed_out_keyboard_popup_is_reported_without_rotation_or_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            initial_state = {
+                "providers": {
+                    "keyboard": {"lastShownAt": "2026-10-01T08:00:00+00:00"},
+                    "apple": {"lastShownAt": "2026-10-03T09:00:00+00:00"},
+                },
+                "reviewHistory": [],
+            }
+            state.write_text(json.dumps(initial_state), encoding="utf-8")
+            calls = []
+
+            def runner(command, **kwargs):
+                calls.append((command, kwargs))
+                if command == ["keyboard-popup"]:
+                    raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 600))
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            result = run_shortcut_review(
+                {
+                    "return_flashcard_refresh_command": ["keyboard-refresh"],
+                    "return_shortcut_popup_command": ["keyboard-popup"],
+                    "apple_shortcut_review_refresh_command": ["apple-refresh"],
+                    "apple_shortcut_review_popup_command": ["apple-popup"],
+                },
+                automatic=True,
+                runner=runner,
+                idle_provider=lambda: 300,
+                state_path=state,
+                now=datetime(2026, 10, 3, 10, tzinfo=timezone.utc),
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result.get("timed_out", False))
+            self.assertEqual(result["failed_step"], "popup")
+            self.assertEqual([command for command, _kwargs in calls], [
+                ["keyboard-refresh"],
+                ["keyboard-popup"],
+            ])
+            self.assertEqual(calls[-1][1]["timeout"], 600)
+            self.assertEqual(json.loads(state.read_text(encoding="utf-8")), initial_state)
+
+    def test_automatic_popup_waits_for_fresh_five_minute_idle_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            samples = iter([299, None, 300])
+            sleeps = []
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            result = run_shortcut_review(
+                {
+                    "return_flashcard_refresh_command": ["keyboard-refresh"],
+                    "return_shortcut_popup_command": ["keyboard-popup"],
+                },
+                automatic=True,
+                runner=runner,
+                idle_provider=lambda: next(samples),
+                sleep_fn=sleeps.append,
+                state_path=Path(directory) / "state.json",
+                now=datetime(2026, 9, 10, 8, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(result and result["ok"])
+            self.assertEqual(calls, [["keyboard-refresh"], ["keyboard-popup"]])
+            self.assertEqual(sleeps, [30, 30])
+
+    def test_automatic_popup_honors_configured_maximum_idle_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            samples = iter([901, 0, 299, 300])
+            sleeps = []
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            result = run_shortcut_review(
+                {
+                    "return_flashcard_refresh_command": ["keyboard-refresh"],
+                    "return_shortcut_popup_command": ["keyboard-popup"],
+                    "review_prompt_idle_max_seconds": 900,
+                },
+                automatic=True,
+                runner=runner,
+                idle_provider=lambda: next(samples),
+                sleep_fn=sleeps.append,
+                state_path=Path(directory) / "state.json",
+                now=datetime(2026, 9, 10, 8, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(result and result["ok"])
+            self.assertEqual(calls, [["keyboard-refresh"], ["keyboard-popup"]])
+            self.assertEqual(sleeps, [30, 30, 30])
+
     def test_maint_shortcuts_json_uses_canonical_workflow(self):
         result = {"ok": True, "failed_step": None, "error": "", "steps": []}
         output = io.StringIO()
@@ -173,6 +272,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 8, tzinfo=timezone.utc),
             )
@@ -180,6 +280,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 13, 59, tzinfo=timezone.utc),
             )
@@ -187,6 +288,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 14, tzinfo=timezone.utc),
             )
@@ -194,6 +296,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 20, tzinfo=timezone.utc),
             )
@@ -223,6 +326,7 @@ class ShortcutReviewTests(unittest.TestCase):
                     config,
                     automatic=True,
                     runner=runner,
+                    idle_provider=lambda: 300,
                     state_path=state,
                     now=datetime(2026, 9, 12, hour, tzinfo=local_zone),
                 )
@@ -258,6 +362,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 13, tzinfo=timezone.utc),
             )
@@ -287,6 +392,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc),
             )
@@ -295,6 +401,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 config,
                 automatic=True,
                 runner=runner,
+                idle_provider=lambda: 300,
                 state_path=state,
                 now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc),
             )
