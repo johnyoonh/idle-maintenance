@@ -68,6 +68,75 @@ class AppAuditorTests(unittest.TestCase):
         runner.assert_called_once()
         self.assertEqual(result[app][1], "2024-03-04")
 
+    def test_more_recent_spotlight_date_takes_precedence_over_older_app_usage(self):
+        app = "/Applications/One.app"
+        normalized = app_auditor.normalize_app_path(app)
+        runner = Mock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout="2026-10-04 00:00:00 +0000",
+            )
+        )
+        # Usage timestamp from 2026-07-01 (1782864000) is older than Spotlight 2026-10-04
+        app_usage = {normalized: 1782864000.0}
+
+        result = app_auditor.get_last_used_many(
+            [app],
+            app_usage,
+            {},
+            timeout=1.0,
+            command_runner=runner,
+        )
+
+        self.assertEqual(result[app][1], "2026-10-04")
+
+    def test_more_recent_app_usage_takes_precedence_over_older_spotlight_date(self):
+        app = "/Applications/One.app"
+        normalized = app_auditor.normalize_app_path(app)
+        runner = Mock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout="2026-05-01 00:00:00 +0000",
+            )
+        )
+        from datetime import datetime
+        dt = datetime(2026, 10, 4, 12, 0)
+        app_usage = {normalized: dt.timestamp()}
+
+        result = app_auditor.get_last_used_many(
+            [app],
+            app_usage,
+            {},
+            timeout=1.0,
+            command_runner=runner,
+        )
+
+        self.assertIn("observed", result[app][1])
+        self.assertTrue(result[app][1].startswith("2026-10-04"))
+
+    def test_same_day_spotlight_time_takes_precedence_over_older_app_usage(self):
+        from datetime import datetime, timezone
+
+        app = "/Applications/One.app"
+        normalized = app_auditor.normalize_app_path(app)
+        runner = Mock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout="2026-10-04 18:00:00 +0000",
+            )
+        )
+        app_usage = {normalized: datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc).timestamp()}
+
+        result = app_auditor.get_last_used_many(
+            [app],
+            app_usage,
+            {},
+            timeout=1.0,
+            command_runner=runner,
+        )
+
+        self.assertEqual(result[app][1], "2026-10-04")
+
 
 if __name__ == "__main__":
     unittest.main()

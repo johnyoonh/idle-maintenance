@@ -127,7 +127,7 @@ class AsyncAppReviewTests(unittest.TestCase):
         shortcut_review.assert_not_called()
         self.assertEqual(events, ["process", "close", "activity"])
 
-    def test_closing_process_review_still_allows_post_review_shortcuts(self):
+    def test_closing_process_review_does_not_trigger_post_review_shortcuts(self):
         audit = Mock(returncode=0, stdout="")
         config = {"max_prompts": 1, "max_entries_per_idle_return": 1}
         with (
@@ -137,6 +137,65 @@ class AsyncAppReviewTests(unittest.TestCase):
             patch.object(maintenance._app_actions, "launch_worker", return_value=True),
             patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
             patch.object(maintenance._core, "run_process_audit", return_value=(False, 0)),
+        ):
+            self.assertFalse(maintenance._run_app_review())
+
+    def test_empty_app_review_does_not_trigger_post_review_shortcuts(self):
+        audit = Mock(returncode=0, stdout="")
+        config = {"max_prompts": 1, "max_entries_per_idle_return": 1}
+        with (
+            patch.object(maintenance, "_interactive_lock", return_value=contextlib.nullcontext(True)),
+            patch.object(maintenance, "load_config", return_value=config),
+            patch.object(maintenance.subprocess, "run", return_value=audit),
+            patch.object(maintenance._app_actions, "launch_worker", return_value=True),
+            patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
+            patch.object(maintenance._core, "run_process_audit", return_value=(True, 0)),
+            patch.object(maintenance._core, "load_json", return_value=[]),
+            patch.object(maintenance._core, "load_custom_whitelist", return_value={}),
+            patch.object(maintenance._core, "save_json", return_value=True),
+        ):
+            self.assertFalse(maintenance._run_app_review())
+
+    def test_quitting_app_review_does_not_trigger_post_review_shortcuts(self):
+        audit = Mock(returncode=0, stdout="/Applications/Demo.app|2025-01-01\n")
+        config = {"max_prompts": 1, "max_entries_per_idle_return": 1}
+        with (
+            patch.object(maintenance, "_interactive_lock", return_value=contextlib.nullcontext(True)),
+            patch.object(maintenance, "load_config", return_value=config),
+            patch.object(maintenance.subprocess, "run", return_value=audit),
+            patch.object(maintenance._app_actions, "launch_worker", return_value=True),
+            patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
+            patch.object(maintenance._core, "run_process_audit", return_value=(True, 0)),
+            patch.object(maintenance._core, "load_json", return_value=[]),
+            patch.object(maintenance._core, "load_custom_whitelist", return_value={}),
+            patch.object(maintenance._core, "queue_item_is_snoozed", return_value=False),
+            patch.object(maintenance._core, "app_usage_detail", return_value="detail"),
+            patch.object(maintenance._core, "get_restore_source", return_value={"source": "brew"}),
+            patch.object(maintenance._core, "app_cleanup_config", return_value=({}, None)),
+            patch.object(maintenance._core, "prompt_user", return_value="QUIT"),
+            patch.object(maintenance._core, "save_json", return_value=True),
+        ):
+            self.assertFalse(maintenance._run_app_review())
+
+    def test_completed_app_review_triggers_post_review_shortcuts(self):
+        audit = Mock(returncode=0, stdout="/Applications/Demo.app|2025-01-01\n")
+        config = {"max_prompts": 1, "max_entries_per_idle_return": 1}
+        with (
+            patch.object(maintenance, "_interactive_lock", return_value=contextlib.nullcontext(True)),
+            patch.object(maintenance, "load_config", return_value=config),
+            patch.object(maintenance.subprocess, "run", return_value=audit),
+            patch.object(maintenance._app_actions, "launch_worker", return_value=True),
+            patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
+            patch.object(maintenance._core, "run_process_audit", return_value=(True, 0)),
+            patch.object(maintenance._core, "load_json", return_value=[]),
+            patch.object(maintenance._core, "load_custom_whitelist", return_value={}),
+            patch.object(maintenance._core, "queue_item_is_snoozed", return_value=False),
+            patch.object(maintenance._core, "app_usage_detail", return_value="detail"),
+            patch.object(maintenance._core, "get_restore_source", return_value={"source": "brew"}),
+            patch.object(maintenance._core, "app_cleanup_config", return_value=({}, None)),
+            patch.object(maintenance._core, "prompt_user", return_value="KEEP"),
+            patch.object(maintenance._core, "record_keep", return_value=True),
+            patch.object(maintenance._core, "save_json", return_value=True),
         ):
             self.assertTrue(maintenance._run_app_review())
 
