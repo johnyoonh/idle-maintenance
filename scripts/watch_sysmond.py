@@ -51,25 +51,31 @@ def process_info(pid: int) -> str:
         return "exited before mapping"
 
 
-def sample_directory(path: str) -> str:
+def sample_directory(path: str, owner_uid: int, owner_gid: int) -> str:
     os.makedirs(path, mode=0o700, exist_ok=True)
     info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-        raise RuntimeError(f"sample directory must be a real directory owned by this user: {path}")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, owner_uid):
+        raise RuntimeError(f"sample directory must be a real directory owned by root or the invoking user: {path}")
+    if info.st_uid != owner_uid or info.st_gid != owner_gid:
+        os.chown(path, owner_uid, owner_gid)
     os.chmod(path, 0o700)
     return path
 
 
-def capture(pid: int, seconds: float, directory: str) -> tuple[str, str]:
+def capture(pid: int, seconds: float, directory: str, owner_uid: int, owner_gid: int) -> tuple[str, str]:
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     fd, sample_path = tempfile.mkstemp(prefix=f"sysmond_{stamp}_", suffix=".sample.txt", dir=directory)
     os.close(fd)
     # Preserve each private sample: when no peer name is found, the full report
     # is the evidence needed to improve the detector rather than a discarded file.
     os.chmod(sample_path, 0o600)
-    run("/usr/bin/sample", str(pid), str(seconds), "-file", sample_path, timeout=seconds + 20)
-    with open(sample_path, encoding="utf-8", errors="replace") as handle:
-        return sample_path, handle.read()
+    try:
+        run("/usr/bin/sample", str(pid), str(seconds), "-file", sample_path, timeout=seconds + 20)
+        with open(sample_path, encoding="utf-8", errors="replace") as handle:
+            report = handle.read()
+        return sample_path, report
+    finally:
+        os.chown(sample_path, owner_uid, owner_gid)
 
 
 def watch(args: argparse.Namespace) -> int:
@@ -82,11 +88,13 @@ def watch(args: argparse.Namespace) -> int:
 
     print(
         f"Watching sysmond (threshold {args.threshold:g}% for {args.confirmations} checks, "
-        f"every {args.interval:g}s); samples kept in {args.sample_dir}; Ctrl-C stops.",
+        f"every {args.interval:g}s); samples kept in {args.sample_dir} for the invoking user; Ctrl-C stops.",
         flush=True,
     )
+    owner_uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    owner_gid = int(os.environ.get("SUDO_GID", os.getgid()))
     try:
-        args.sample_dir = sample_directory(args.sample_dir)
+        args.sample_dir = sample_directory(args.sample_dir, owner_uid, owner_gid)
     except OSError as exc:
         print(f"cannot prepare private sample directory: {exc}", file=sys.stderr)
         return 2
@@ -107,7 +115,7 @@ def watch(args: argparse.Namespace) -> int:
             print(f"{dt.datetime.now().astimezone().isoformat(timespec='seconds')} sysmond pid={pid} cpu={current:.1f}%", flush=True)
             if consecutive >= args.confirmations and now >= next_capture:
                 try:
-                    sample_path, report = capture(pid, args.sample_seconds, args.sample_dir)
+                    sample_path, report = capture(pid, args.sample_seconds, args.sample_dir, owner_uid, owner_gid)
                     peer_pids = sorted({int(value) for value in PEER_RE.findall(report)})
                     print(f"sampled sysmond pid={pid}; peer queues={len(peer_pids)}; sample={sample_path}", flush=True)
                     if not peer_pids:
@@ -131,7 +139,7 @@ def main() -> int:
     parser.add_argument(
         "--sample-dir",
         default=os.path.join(tempfile.gettempdir(), "sysmond-watch"),
-        help="private directory for retained sample reports (default: /tmp/sysmond-watch)",
+        help="private directory, owned by the invoking user, for retained sample reports (default: /tmp/sysmond-watch)",
     )
     args = parser.parse_args()
     if args.threshold <= 0 or args.interval <= 0 or args.confirmations < 1 or args.sample_seconds <= 0 or args.cooldown < 0:
