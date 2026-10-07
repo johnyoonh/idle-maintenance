@@ -65,17 +65,8 @@ def load_audit_cache():
 def get_last_used_many(apps, app_usage, cache, timeout, command_runner=subprocess.run):
     """Resolve Spotlight metadata in one bounded subprocess, preserving input order."""
     resolved = {}
-    spotlight_apps = []
-    for app in apps:
-        usage_timestamp = app_usage.get(normalize_app_path(app))
-        if usage_timestamp is not None:
-            last_used = datetime.fromtimestamp(usage_timestamp)
-            resolved[app] = (
-                (datetime.now() - last_used).days,
-                last_used.strftime("%Y-%m-%d") + " (observed)",
-            )
-        else:
-            spotlight_apps.append(app)
+    spotlight_datetimes = {}
+    spotlight_apps = list(apps)
 
     if spotlight_apps and timeout > 0:
         try:
@@ -93,26 +84,48 @@ def get_last_used_many(apps, app_usage, cache, timeout, command_runner=subproces
                 for app, value in zip(spotlight_apps, lines):
                     if value and value != "(null)":
                         try:
-                            last_used = datetime.strptime(value[:10], "%Y-%m-%d")
-                            resolved[app] = ((datetime.now() - last_used).days, value[:10])
-                            cache[normalize_app_path(app)] = value[:10]
+                            try:
+                                last_used = datetime.strptime(value, "%Y-%m-%d %H:%M:%S %z")
+                                last_used = last_used.astimezone().replace(tzinfo=None)
+                            except ValueError:
+                                last_used = datetime.strptime(value[:10], "%Y-%m-%d")
+                            spotlight_datetimes[app] = last_used
+                            date_text = value[:10]
+                            resolved[app] = ((datetime.now() - last_used).days, date_text)
+                            cache[normalize_app_path(app)] = date_text
                         except ValueError:
                             pass
         except (OSError, subprocess.SubprocessError):
             pass
 
-    for app in spotlight_apps:
-        if app in resolved:
-            continue
-        cached = cache.get(normalize_app_path(app))
-        if isinstance(cached, str) and cached:
+    for app in apps:
+        usage_timestamp = app_usage.get(normalize_app_path(app))
+        usage_dt = None
+        if usage_timestamp is not None:
             try:
-                last_used = datetime.strptime(cached[:10], "%Y-%m-%d")
-                resolved[app] = ((datetime.now() - last_used).days, cached[:10])
-                continue
-            except ValueError:
-                pass
-        resolved[app] = (None, "Unknown")
+                usage_dt = datetime.fromtimestamp(usage_timestamp)
+            except (TypeError, ValueError, OverflowError):
+                usage_dt = None
+
+        spotlight_dt = spotlight_datetimes.get(app)
+
+        if usage_dt is not None and (spotlight_dt is None or usage_dt >= spotlight_dt):
+            resolved[app] = (
+                (datetime.now() - usage_dt).days,
+                usage_dt.strftime("%Y-%m-%d") + " (observed)",
+            )
+        elif spotlight_dt is not None:
+            pass
+        else:
+            cached = cache.get(normalize_app_path(app))
+            if isinstance(cached, str) and cached and cached != "Unknown":
+                try:
+                    last_used = datetime.strptime(cached[:10], "%Y-%m-%d")
+                    resolved[app] = ((datetime.now() - last_used).days, cached[:10])
+                    continue
+                except ValueError:
+                    pass
+            resolved[app] = (None, "Unknown")
     return resolved
 
 def get_active_extensions(timeout=COMMAND_TIMEOUT_SECONDS, command_runner=subprocess.run):

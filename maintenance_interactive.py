@@ -162,9 +162,8 @@ def _run_app_review() -> bool:
             planned_app_output=stale_output,
         )
         if not process_ok:
-            # Closing the process review ends this stage cleanly. Keep the app
-            # queue untouched, but still allow the post-review shortcut gate.
-            return True
+            # Closing the process review ends this stage cleanly without showing post-review shortcuts.
+            return False
         remaining_prompts = max(0, max_entries - process_prompts)
 
         stale_apps: list[str] = []
@@ -243,7 +242,7 @@ def _run_app_review() -> bool:
 
                 if action == "QUIT":
                     _persist_app_state(current_queue, whitelist)
-                    return True
+                    return False
 
                 current_queue, app_done, delta = _handle_app_action(
                     action,
@@ -255,7 +254,7 @@ def _run_app_review() -> bool:
                 processed += delta
 
         _persist_app_state(current_queue, whitelist)
-    return True
+    return processed > 0
 
 
 def _finish_shortcut_review() -> None:
