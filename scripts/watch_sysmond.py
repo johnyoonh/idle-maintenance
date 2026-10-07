@@ -52,13 +52,33 @@ def process_info(pid: int) -> str:
 
 
 def sample_directory(path: str, owner_uid: int, owner_gid: int) -> str:
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, owner_uid):
-        raise RuntimeError(f"sample directory must be a real directory owned by root or the invoking user: {path}")
-    if info.st_uid != owner_uid or info.st_gid != owner_gid:
-        os.chown(path, owner_uid, owner_gid)
-    os.chmod(path, 0o700)
+    path = os.path.abspath(path)
+    created = False
+    try:
+        os.mkdir(path, 0o700)
+        created = True
+    except FileExistsError:
+        pass
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(f"sample path must be a real directory: {path}")
+        if created:
+            if info.st_uid != os.geteuid():
+                raise RuntimeError(f"new sample directory ownership changed unexpectedly: {path}")
+            if info.st_uid != owner_uid or info.st_gid != owner_gid:
+                os.fchown(fd, owner_uid, owner_gid)
+            os.fchmod(fd, 0o700)
+            info = os.fstat(fd)
+        if info.st_uid != owner_uid or info.st_gid != owner_gid or stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError(
+                f"sample directory must already be private and owned by the invoking user: {path}"
+            )
+    finally:
+        os.close(fd)
     return path
 
 
