@@ -10,11 +10,13 @@ class AppActionPackagingTests(unittest.TestCase):
         deploy_core = (ROOT / "deploy_core.sh").read_text(encoding="utf-8")
         deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
         self.assertIn('cp app_actions.py "$DEST/"', deploy_core)
+        self.assertIn('cp app_leftovers.py "$DEST/"', deploy_core)
         self.assertIn("app_actions.py", deploy)
+        self.assertIn("app_leftovers.py", deploy)
 
     def test_app_bundle_includes_worker(self):
         build = (ROOT / "build_app.sh").read_text(encoding="utf-8")
-        self.assertIn("activity_intelligence.py,app_actions.py,idle_gate.py,maintenance_core.py", build)
+        self.assertIn("activity_intelligence.py,app_actions.py,app_leftovers.py,idle_gate.py,maintenance_core.py", build)
 
     def test_prompt_helper_is_compiled_for_both_deployments(self):
         deploy_core = (ROOT / "deploy_core.sh").read_text(encoding="utf-8")
