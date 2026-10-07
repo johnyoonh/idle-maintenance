@@ -11,6 +11,7 @@ REQUIRED = (
     "review_ui.py",
     "resource_monitor.py",
     "idle_gate.py",
+    "app_leftovers.py",
 )
 
 

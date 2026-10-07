@@ -10,6 +10,7 @@ import signal
 import tempfile
 import uuid
 from pathlib import Path
+import app_leftovers
 from idle_config import (
     APP_SUPPORT_DIR,
     DEFAULT_CONFIG,
@@ -198,6 +199,33 @@ def get_restore_source(config, app_path):
     if not isinstance(providers, list):
         providers = []
     return classify_app_restore_source(app_path, providers)
+
+
+def _quarantine_leftover_configs(app_path, metadata, config):
+    if not app_leftovers.quarantine_enabled(config):
+        return
+    try:
+        leftovers = app_leftovers.discover_leftovers(app_path, metadata, config)
+        entries = app_leftovers.quarantine_leftovers(app_path, metadata, leftovers, config)
+    except Exception as error:
+        message = f"App moved to Trash, but config quarantine was incomplete for {app_path}: {error}"
+        try:
+            log(message)
+        except Exception:
+            pass
+        try:
+            notify_user(
+                "Idle Maintenance",
+                f"{os.path.basename(app_path)} moved to Trash, but config quarantine was incomplete. See IdleMaintenance.log.",
+            )
+        except Exception:
+            pass
+        return
+    if entries:
+        try:
+            log(f"Quarantined {len(entries)} app config item(s) after moving {app_path} to Trash.")
+        except Exception:
+            pass
 
 def app_usage_detail(last_used, stale_days_limit):
     value = (last_used or "Unknown").strip()
@@ -998,22 +1026,21 @@ def delete_app(app_path, config):
     }
     try:
         shutil.move(app_path, dest_path)
-        append_jsonl(ledger_path, ledger_entry)
-        run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
-        return True
     except Exception as e:
         log(
             f"Failed to trash {app_path} via shutil; "
             f"skipping Finder automation and trying a privileged move: {e}"
         )
         success = trash_with_admin_mv(app_path, dest_path)
-        if success:
-            ledger_entry["action"] = "admin-trash"
-            append_jsonl(ledger_path, ledger_entry)
-            run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
-        else:
+        if not success:
             notify_user("Idle Maintenance", f"Could not move {os.path.basename(app_path)} to Trash. See IdleMaintenance.log.")
-        return success
+            return False
+        ledger_entry["action"] = "admin-trash"
+
+    append_jsonl(ledger_path, ledger_entry)
+    run_delete_hooks(hooks.get("after_delete_app", []), ledger_entry)
+    _quarantine_leftover_configs(app_path, metadata, config)
+    return True
 
 def main():
     process_only = len(sys.argv) > 1 and sys.argv[1] == "--process-audit"

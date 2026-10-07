@@ -69,6 +69,28 @@ Path to a JSONL ledger. Each deletion writes one line with the app path, bundle 
 
 Ordered list of providers used to decide whether an app is recoverable.
 
+`app_cleanup.leftover_review`
+
+Optional conservative review of likely app configuration under the invoking user's home directory. It is disabled by default. To enable it, set `enabled` to `true` and keep `mode` as `conservative` and `action` as `quarantine`:
+
+```json
+{
+  "app_cleanup": {
+    "leftover_review": {
+      "enabled": true,
+      "mode": "conservative",
+      "action": "quarantine",
+      "max_item_size_mb": 25,
+      "max_total_size_mb": 250,
+      "quarantine_dir": "~/Library/Application Support/idle-maintenance/quarantine",
+      "ledger": "~/Library/Application Support/idle-maintenance/config-quarantine.jsonl"
+    }
+  }
+}
+```
+
+When enabled, the app review displays the eligible config paths before asking for a decision. Choosing Delete moves the app to Trash, then moves eligible config items into quarantine. The quarantine ledger records each successful move. If quarantine fails after the app has been moved, app deletion remains recorded as successful and a notification reports the config error. Caches, logs, saved app state, symlinks, paths outside the home directory, and items over the configured size limits are excluded.
+
 ## Restore Source Providers
 
 `homebrew_bundle`

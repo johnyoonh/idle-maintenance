@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterator
 
 import activity_intelligence as _activity_intelligence
 import app_actions as _app_actions
+import app_leftovers
 import maintenance_core as _core
 import process_review as _process_review
 from idle_config import keep_entry_is_active, load_config, next_keep_delay_days
@@ -51,6 +52,21 @@ def _persist_app_state(current_queue: list[dict[str, Any]], whitelist: dict[str,
     """Persist each review disposition before another prompt can be shown."""
     _core.save_json(_core.QUEUE_PATH, current_queue)
     _core.save_json(_core.WHITELIST_PATH, whitelist)
+
+
+def _leftover_review_detail(app_path: str, config: dict[str, Any]) -> str:
+    if not app_leftovers.quarantine_enabled(config):
+        return ""
+    try:
+        metadata = _core.app_metadata(app_path)
+        leftovers = app_leftovers.discover_leftovers(app_path, metadata, config)
+    except Exception as error:
+        _core.log(f"Could not inspect app config leftovers for {app_path}: {error}")
+        return "Config quarantine is enabled, but paths could not be inspected; no config will be moved."
+    details = app_leftovers.describe_leftovers(leftovers)
+    if not details:
+        return "Config quarantine is enabled, but no eligible config paths were found."
+    return f"Config quarantine is enabled. {app_leftovers.summarize_leftovers(leftovers)}\n{details}"
 
 
 def _remove_app(current_queue: list[dict[str, Any]], app_path: str) -> list[dict[str, Any]]:
@@ -225,6 +241,9 @@ def _run_app_review() -> bool:
                     last_used_info += " • Restore: unknown"
                 else:
                     last_used_info += f" • Restore: {restore_source.get('restore_command', restore_source.get('source'))}"
+                leftover_detail = _leftover_review_detail(app_path, config)
+                if leftover_detail:
+                    last_used_info += "\n" + leftover_detail
                 if item.get("last_prompted", 0) > 0:
                     last_used_info += (
                         " (Last prompted/tried: "

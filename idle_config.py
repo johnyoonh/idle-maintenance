@@ -146,6 +146,15 @@ DEFAULT_CONFIG = {
         "allow_unknown_restore_source": False,
         "deletion_ledger": "~/Library/Application Support/idle-maintenance/app-deletions.jsonl",
         "restore_sources": [],
+        "leftover_review": {
+            "enabled": False,
+            "mode": "conservative",
+            "action": "quarantine",
+            "max_item_size_mb": 25,
+            "max_total_size_mb": 250,
+            "quarantine_dir": "~/Library/Application Support/idle-maintenance/quarantine",
+            "ledger": "~/Library/Application Support/idle-maintenance/config-quarantine.jsonl",
+        },
     },
     "hooks": {
         "before_delete_app": [],
