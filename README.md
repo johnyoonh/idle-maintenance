@@ -303,3 +303,17 @@ Expected normal state:
 - The runner usually exits quickly.
 - Logs may show repeated deferrals during active/heavy use.
 - No resident `idle_watcher.py` or `app_usage_watcher` process is required.
+
+Website conflict cards in keyboard review use the companion `kb browser web`
+commands. The keyboard provider hands its exact audit result to a private
+per-invocation report, waits for the existing automatic idle gate, and opens
+reviewable website conflict cards before normal shortcut practice. The kb
+helper refreshes profile identity and assignments before showing cards, uses
+the shared focus queue, and offers resolution instructions, snooze, intentional
+keep, and candidate replacements without changing browser bindings. Normal
+practice remains available if this advisory review fails; automatic practice
+checks idle again after the conflict dialog. The setting is
+`browser_shortcut_conflict_review_command` (default `kb browser web review`);
+set it to an empty command to disable conflict dialogs. Requires the companion
+keybinding website-conflict version; the optional website usage observer is a
+separate browser installation and local export/import workflow.

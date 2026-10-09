@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import time
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -258,6 +259,38 @@ def _run_provider(
                     "steps": steps,
                     "browser_audit": browser_audit,
                 }
+        if provider == "keyboard" and name == "popup" and browser_audit and browser_audit.get("review_cards"):
+            conflict_command = normalize_command(config.get("browser_shortcut_conflict_review_command"), home)
+            if conflict_command:
+                # Hand off this invocation's exact result, not a shared report
+                # which another maintenance run may have replaced.
+                with tempfile.TemporaryDirectory(prefix="maint-shortcut-conflicts-") as temporary:
+                    report_path = Path(temporary) / "audit.json"
+                    with open(report_path, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as handle:
+                        json.dump(browser_audit, handle)
+                    conflict_command += ["--audit-report", str(report_path)]
+                    try:
+                        conflict_result = runner(conflict_command, capture_output=True, text=True, check=False,
+                                                 timeout=float(config.get("shortcut_popup_timeout_seconds", 600)))
+                        steps.append(_step_result("browser-conflict-review", conflict_command, conflict_result))
+                        if conflict_result.returncode:
+                            browser_audit.setdefault("warnings", []).append("Website conflict review failed; keyboard practice remains available.")
+                    except (OSError, subprocess.SubprocessError) as error:
+                        steps.append({"name": "browser-conflict-review", "command": conflict_command,
+                                      "returncode": 126, "stdout": "", "stderr": str(error)})
+                        browser_audit.setdefault("warnings", []).append("Website conflict review unavailable; keyboard practice remains available.")
+                if automatic:
+                    # The user may have resumed work while resolving a card.
+                    try:
+                        wait_until_idle(minimum_idle,
+                            maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
+                            idle_provider=idle_provider,
+                            poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
+                            sleep_fn=sleep_fn)
+                    except (OSError, ValueError, TypeError) as error:
+                        return {"ok": False, "provider": provider, "failed_step": "idle-gate",
+                                "error": str(error), "steps": steps, "browser_audit": browser_audit}
+
         run_kwargs = {"capture_output": True, "text": True, "check": False}
         if provider == "keyboard" and name == "popup":
             run_kwargs["timeout"] = max(
