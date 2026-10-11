@@ -10,6 +10,9 @@ The scheduled runner is the authoritative background maintenance path. The old r
 An optional [lid backlight guard](docs/lid-backlight.md) turns off only the
 built-in backlight while the lid is closed, preserving the existing sleep policy
 and restoring brightness on reopen.
+The optional [AI sleep controller](docs/ai-lid-sleep.md) allows closed-lid
+wakefulness only while observable AI work and internet access justify it, with
+bounded release and a separate crash watchdog.
 
 ## Terminal Suggestions
 
