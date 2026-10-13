@@ -470,3 +470,48 @@ class ShortcutReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class WebsiteConflictReviewTests(unittest.TestCase):
+    def test_conflict_dialog_receives_audit_after_idle_gate_before_flashcards(self):
+        events = []
+        payload = {'ok': True, 'browsers': [{'browser': 'edge', 'profile': 'Default'}],
+                   'review_cards': [{'id': 'synthetic', 'origin': 'https://chatgpt.com'}]}
+        def runner(command, **kwargs):
+            events.append(command[0])
+            if command[0] == 'web-review':
+                report_path = Path(command[command.index('--audit-report') + 1])
+                self.assertEqual(json.loads(report_path.read_text()), payload)
+                self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload) if command[0] == 'audit' else '{}', stderr='')
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch('shortcut_review.wait_until_idle', side_effect=lambda *a, **k: events.append('idle')):
+                result = run_shortcut_review({
+                    'browser_shortcut_audit_command': ['audit'],
+                    'browser_shortcut_conflict_review_command': ['web-review'],
+                    'return_flashcard_refresh_command': ['refresh'],
+                    'return_shortcut_popup_command': ['popup'],
+                }, provider='keyboard', automatic=True, runner=runner, state_path=Path(temporary)/'state.json')
+        self.assertTrue(result['ok'])
+        self.assertEqual(events, ['audit', 'refresh', 'idle', 'web-review', 'idle', 'popup'])
+        self.assertIn('browser-conflict-review', [step['name'] for step in result['steps']])
+
+    def test_conflict_review_failure_keeps_practice_and_removes_private_report(self):
+        paths = []
+        payload = {'review_cards':[{'id':'synthetic'}]}
+        def runner(command, **kwargs):
+            if command[0] == 'web-review':
+                paths.append(Path(command[-1]))
+                raise subprocess.TimeoutExpired(command, 600)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload) if command[0]=='audit' else '{}', stderr='')
+        with tempfile.TemporaryDirectory() as temporary:
+            result = run_shortcut_review({
+                'browser_shortcut_audit_command':['audit'],
+                'browser_shortcut_conflict_review_command':['web-review'],
+                'return_flashcard_refresh_command':['refresh'],
+                'return_shortcut_popup_command':['popup'],
+            }, provider='keyboard', runner=runner, state_path=Path(temporary)/'state.json')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['steps'][-1]['name'], 'popup')
+        self.assertTrue(result['browser_audit']['warnings'])
+        self.assertTrue(paths)
+        self.assertTrue(all(not path.exists() for path in paths))
