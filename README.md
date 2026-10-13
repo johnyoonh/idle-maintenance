@@ -7,6 +7,13 @@ Low-friction maintenance for this Mac, split into two lightweight paths:
 
 The scheduled runner is the authoritative background maintenance path. The old resident `IdleMaintenance.app` / `idle_watcher.py` GUI watcher is legacy/manual and is not expected to stay running.
 
+An optional [lid backlight guard](docs/lid-backlight.md) turns off only the
+built-in backlight while the lid is closed, preserving the existing sleep policy
+and restoring brightness on reopen.
+The optional [AI sleep controller](docs/ai-lid-sleep.md) allows closed-lid
+wakefulness only while observable AI work and internet access justify it, with
+bounded release and a separate crash watchdog.
+
 ## Terminal Suggestions
 
 When a new terminal tab opens during work hours, `~/.zshrc` calls:
