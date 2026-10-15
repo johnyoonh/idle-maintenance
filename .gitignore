@@ -68,3 +68,4 @@ htmlcov/
 *.err
 *.lock
 *.pid
+/output.txt
