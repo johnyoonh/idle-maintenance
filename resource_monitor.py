@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from idle_config import APP_SUPPORT_DIR, atomic_write_json, load_config, sample_disk_activity
 from idle_gate import idle_window_contains, read_idle_seconds
+from maintenance_logger import log_slowdown, log_timeout, track_slowdown
 import process_identity as identity
 from process_triage import triage_process
 
@@ -689,20 +690,21 @@ class ResourceMonitor:
 
         self.state["return_pending"] = False
         self.state["last_return_flow_at"] = now
-        try:
-            result = self.return_fn()
-        except Exception as error:
-            detail = str(error).strip() or type(error).__name__
-            self.state["return_health"] = {
-                "last_error": detail[:500],
-                "last_error_at": now,
-            }
-        else:
-            self.state["return_health"] = {
-                "last_error": "",
-                "last_success_at": now,
-                "fallback": bool(result.get("fallback")) if isinstance(result, dict) else False,
-            }
+        with track_slowdown("resource_monitor", "return_flow", threshold=5.0):
+            try:
+                result = self.return_fn()
+            except Exception as error:
+                detail = str(error).strip() or type(error).__name__
+                self.state["return_health"] = {
+                    "last_error": detail[:500],
+                    "last_error_at": now,
+                }
+            else:
+                self.state["return_health"] = {
+                    "last_error": "",
+                    "last_success_at": now,
+                    "fallback": bool(result.get("fallback")) if isinstance(result, dict) else False,
+                }
 
     def observe(
         self,

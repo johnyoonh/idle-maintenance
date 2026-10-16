@@ -24,20 +24,22 @@ from restore_sources import app_metadata, classify_app_restore_source
 LOCK_FILE = "/tmp/idle_maintenance.lock"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = APP_SUPPORT_DIR
-LOG_DIR = os.path.expanduser("~/Library/Logs")
-LOG_PATH = os.path.join(LOG_DIR, "IdleMaintenance.log")
+from maintenance_logger import (
+    LOG_DIR,
+    LOG_PATH,
+    SLOW_LOG_PATH,
+    load_recent_slowdowns,
+    log,
+    log_slowdown,
+    log_timeout,
+    track_slowdown,
+)
 QUEUE_PATH = os.path.join(STATE_DIR, "stale_queue.json")
 WHITELIST_PATH = os.path.join(STATE_DIR, "custom_whitelist.json")
 PROCESS_QUEUE_PATH = os.path.join(STATE_DIR, "process_queue.json")
 PROCESS_WHITELIST_PATH = os.path.join(STATE_DIR, "process_whitelist.json")
 DELETION_LEDGER_PATH = os.path.join(STATE_DIR, "app-deletions.jsonl")
 DEFAULT_MAX_PROMPTS = int(DEFAULT_CONFIG["max_prompts"])
-
-def log(msg):
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    os.makedirs(LOG_DIR, exist_ok=True)
-    with open(LOG_PATH, "a") as f:
-        f.write(f"[{timestamp}] {msg}\n")
 
 def _terminal_notifier_path():
     discovered = shutil.which("terminal-notifier")

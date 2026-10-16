@@ -153,17 +153,21 @@ def _run_app_review() -> bool:
         # Complete bounded discovery before opening the persistent review helper.
         # The same snapshot supplies process-stage pending counts and app reviews.
         auditor_path = os.path.join(_core.BASE_DIR, "app_auditor.py")
-        try:
-            result = subprocess.run(
-                ["/usr/bin/python3", auditor_path],
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=7,
-            )
-            stale_output = result.stdout.splitlines() if result.returncode == 0 else []
-        except (OSError, subprocess.SubprocessError):
-            stale_output = []
+        with _core.track_slowdown("maintenance_interactive", "app_auditor.py", threshold=3.0):
+            try:
+                result = subprocess.run(
+                    ["/usr/bin/python3", auditor_path],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=7,
+                )
+                stale_output = result.stdout.splitlines() if result.returncode == 0 else []
+            except subprocess.TimeoutExpired as exc:
+                _core.log_timeout("maintenance_interactive", "app_auditor.py", timeout=7.0, details=str(exc))
+                stale_output = []
+            except (OSError, subprocess.SubprocessError):
+                stale_output = []
 
         active_action_paths = _app_actions.active_action_paths()
         stale_output = [
@@ -172,11 +176,12 @@ def _run_app_review() -> bool:
             if (line.split("|", 1)[0] if "|" in line else line) not in active_action_paths
         ]
 
-        process_ok, process_prompts = _core.run_process_audit(
-            config,
-            prompt_budget=max_entries,
-            planned_app_output=stale_output,
-        )
+        with _core.track_slowdown("maintenance_interactive", "run_process_audit", threshold=5.0):
+            process_ok, process_prompts = _core.run_process_audit(
+                config,
+                prompt_budget=max_entries,
+                planned_app_output=stale_output,
+            )
         if not process_ok:
             # Closing the process review ends this stage cleanly without showing post-review shortcuts.
             return False
@@ -251,13 +256,16 @@ def _run_app_review() -> bool:
                         + ")"
                     )
                 keep_days = next_keep_delay_days(config, whitelist.get(app_path))
-                action = _core.prompt_user(
-                    app_path,
-                    close_on_unfocus,
-                    last_used_info,
-                    snooze_hours=app_snooze_hours,
-                    keep_days=keep_days,
-                )
+                app_name = os.path.basename(app_path)
+                with _core.track_slowdown("maintenance_interactive", f"prompt_user:{app_name}", threshold=15.0) as ctx:
+                    action = _core.prompt_user(
+                        app_path,
+                        close_on_unfocus,
+                        last_used_info,
+                        snooze_hours=app_snooze_hours,
+                        keep_days=keep_days,
+                    )
+                    ctx["details"] = f"action={action}"
 
                 if action == "QUIT":
                     _persist_app_state(current_queue, whitelist)
@@ -284,7 +292,8 @@ def _finish_shortcut_review() -> None:
     config = load_config(_core.BASE_DIR)
     if not config.get("show_shortcuts_on_finish", True):
         return
-    result = run_shortcut_review(config, automatic=True)
+    with _core.track_slowdown("maintenance_interactive", "shortcut_review", threshold=5.0):
+        result = run_shortcut_review(config, automatic=True)
     if not result.get("ok") or result.get("skipped"):
         print(render_result(result), file=sys.stderr)
 
@@ -292,8 +301,9 @@ def _finish_shortcut_review() -> None:
 def _start_activity_intelligence() -> None:
     """Process accumulated activity evidence without blocking the interactive handoff."""
     config = load_config(_core.BASE_DIR)
-    if not _activity_intelligence.launch_cycle(config, base_dir=_core.BASE_DIR):
-        _core.log("Activity intelligence cycle was not launched (disabled or unavailable).")
+    with _core.track_slowdown("maintenance_interactive", "activity_intelligence_launch", threshold=3.0):
+        if not _activity_intelligence.launch_cycle(config, base_dir=_core.BASE_DIR):
+            _core.log("Activity intelligence cycle was not launched (disabled or unavailable).")
 
 
 def main(argv: list[str] | None = None) -> Any:

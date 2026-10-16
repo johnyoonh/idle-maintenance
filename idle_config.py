@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime
+from maintenance_logger import log_slowdown, log_timeout
 
 APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/idle-maintenance")
 XDG_CONFIG_DIR = os.path.expanduser("~/.config/idle-watcher")
@@ -336,16 +337,24 @@ def parse_iostat_mib_per_second(output):
 def sample_disk_activity(sample_seconds=1, command_runner=subprocess.run, executable=None):
     executable = executable or shutil.which("iostat") or "/usr/sbin/iostat"
     wait = max(1, int(float(sample_seconds)))
+    timeout_val = wait * 3 + 5
+    start = time.perf_counter()
     try:
         result = command_runner(
             [executable, "-d", "-w", str(wait), "-c", "2"],
             capture_output=True,
             text=True,
-            timeout=wait * 3 + 5,
+            timeout=timeout_val,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        log_timeout("idle_config", "sample_disk_activity (iostat)", timeout=timeout_val, details=str(error))
         return {"available": False, "mib_per_second": None, "error": str(error)}
+    except OSError as error:
+        return {"available": False, "mib_per_second": None, "error": str(error)}
+    duration = time.perf_counter() - start
+    if duration >= max(3.0, wait * 2.0):
+        log_slowdown("idle_config", "sample_disk_activity (iostat)", duration=duration, threshold=max(3.0, wait * 2.0))
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
         return {"available": False, "mib_per_second": None, "error": detail}

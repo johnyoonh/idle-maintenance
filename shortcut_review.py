@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from idle_gate import read_idle_seconds, wait_until_idle
+from maintenance_logger import log_slowdown, log_timeout, track_slowdown
 
 RunFn = Callable[..., subprocess.CompletedProcess[str]]
 PROVIDERS = ("keyboard", "apple")
@@ -199,41 +200,53 @@ def _run_provider(
     if provider == "keyboard":
         audit_command = _browser_audit_command(config, home)
         if audit_command:
-            try:
-                completed = runner(audit_command, capture_output=True, text=True, check=False)
-            except (OSError, subprocess.SubprocessError) as error:
-                # The audit is advisory.  Keep the normal review available if
-                # the optional browser tooling is unavailable, but make the
-                # missing diagnostic visible in the maintenance result.
-                detail = str(error)
-                browser_audit = {
-                    "ok": False,
-                    "conflicts": [],
-                    "stale_assignments": [],
-                    "warnings": [f"browser shortcut audit unavailable: {detail}"],
-                }
-                steps.append({"name": "browser-audit", "command": audit_command, "returncode": 126, "stdout": "", "stderr": detail})
-            else:
-                audit_step = _step_result("browser-audit", audit_command, completed)
-                steps.append(audit_step)
+            audit_timeout = float(config.get("browser_shortcut_audit_timeout_seconds", 15.0))
+            with track_slowdown("shortcut_review", "browser_shortcut_audit", threshold=3.0):
                 try:
-                    parsed = json.loads(audit_step["stdout"])
-                    browser_audit = parsed if isinstance(parsed, dict) else None
-                except (TypeError, ValueError, json.JSONDecodeError):
+                    completed = runner(audit_command, capture_output=True, text=True, check=False, timeout=audit_timeout)
+                except subprocess.TimeoutExpired as error:
+                    detail = str(error)
+                    log_timeout("shortcut_review", "browser_shortcut_audit", timeout=audit_timeout, details=detail)
                     browser_audit = {
                         "ok": False,
                         "conflicts": [],
                         "stale_assignments": [],
-                        "warnings": ["browser shortcut audit returned invalid JSON"],
+                        "warnings": [f"browser shortcut audit timed out: {detail}"],
                     }
-                if completed.returncode != 0:
-                    detail = audit_step["stderr"] or audit_step["stdout"] or f"exit {completed.returncode}"
+                    steps.append({"name": "browser-audit", "command": audit_command, "returncode": 124, "stdout": "", "stderr": detail})
+                except (OSError, subprocess.SubprocessError) as error:
+                    # The audit is advisory.  Keep the normal review available if
+                    # the optional browser tooling is unavailable, but make the
+                    # missing diagnostic visible in the maintenance result.
+                    detail = str(error)
                     browser_audit = {
                         "ok": False,
                         "conflicts": [],
                         "stale_assignments": [],
-                        "warnings": [f"browser shortcut audit failed: {detail}"],
+                        "warnings": [f"browser shortcut audit unavailable: {detail}"],
                     }
+                    steps.append({"name": "browser-audit", "command": audit_command, "returncode": 126, "stdout": "", "stderr": detail})
+                else:
+                    audit_step = _step_result("browser-audit", audit_command, completed)
+                    steps.append(audit_step)
+                    try:
+                        parsed = json.loads(audit_step["stdout"])
+                        browser_audit = parsed if isinstance(parsed, dict) else None
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        browser_audit = {
+                            "ok": False,
+                            "conflicts": [],
+                            "stale_assignments": [],
+                            "warnings": ["browser shortcut audit returned invalid JSON"],
+                        }
+                    if completed.returncode != 0:
+                        detail = audit_step["stderr"] or audit_step["stdout"] or f"exit {completed.returncode}"
+                        browser_audit = {
+                            "ok": False,
+                            "conflicts": [],
+                            "stale_assignments": [],
+                            "warnings": [f"browser shortcut audit failed: {detail}"],
+                        }
 
     for name, command in (("refresh", refresh), ("popup", popup)):
         if automatic and name == "popup":
@@ -241,24 +254,25 @@ def _run_provider(
                 max(0.0, float(config.get("return_active_cutoff_seconds", 30))),
                 float(config.get("review_prompt_idle_seconds", 300)),
             )
-            try:
-                wait_until_idle(
-                    minimum_idle,
-                    maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
-                    idle_provider=idle_provider,
-                    poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
-                    sleep_fn=sleep_fn,
-                )
-            except (OSError, ValueError, TypeError) as error:
-                detail = str(error).strip() or type(error).__name__
-                return {
-                    "ok": False,
-                    "provider": provider,
-                    "failed_step": "idle-gate",
-                    "error": detail,
-                    "steps": steps,
-                    "browser_audit": browser_audit,
-                }
+            with track_slowdown("shortcut_review", f"wait_until_idle:{provider}:{name}", threshold=5.0):
+                try:
+                    wait_until_idle(
+                        minimum_idle,
+                        maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
+                        idle_provider=idle_provider,
+                        poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
+                        sleep_fn=sleep_fn,
+                    )
+                except (OSError, ValueError, TypeError) as error:
+                    detail = str(error).strip() or type(error).__name__
+                    return {
+                        "ok": False,
+                        "provider": provider,
+                        "failed_step": "idle-gate",
+                        "error": detail,
+                        "steps": steps,
+                        "browser_audit": browser_audit,
+                    }
         if provider == "keyboard" and name == "popup" and browser_audit and browser_audit.get("review_cards"):
             conflict_command = normalize_command(config.get("browser_shortcut_conflict_review_command"), home)
             if conflict_command:
@@ -269,63 +283,73 @@ def _run_provider(
                     with open(report_path, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as handle:
                         json.dump(browser_audit, handle)
                     conflict_command += ["--audit-report", str(report_path)]
-                    try:
-                        conflict_result = runner(conflict_command, capture_output=True, text=True, check=False,
-                                                 timeout=float(config.get("shortcut_popup_timeout_seconds", 600)))
-                        steps.append(_step_result("browser-conflict-review", conflict_command, conflict_result))
-                        if conflict_result.returncode:
-                            browser_audit.setdefault("warnings", []).append("Website conflict review failed; keyboard practice remains available.")
-                    except (OSError, subprocess.SubprocessError) as error:
-                        steps.append({"name": "browser-conflict-review", "command": conflict_command,
-                                      "returncode": 126, "stdout": "", "stderr": str(error)})
-                        browser_audit.setdefault("warnings", []).append("Website conflict review unavailable; keyboard practice remains available.")
+                    conflict_timeout = float(config.get("shortcut_popup_timeout_seconds", 600))
+                    with track_slowdown("shortcut_review", "browser_conflict_review", threshold=5.0):
+                        try:
+                            conflict_result = runner(conflict_command, capture_output=True, text=True, check=False,
+                                                     timeout=conflict_timeout)
+                            steps.append(_step_result("browser-conflict-review", conflict_command, conflict_result))
+                            if conflict_result.returncode:
+                                browser_audit.setdefault("warnings", []).append("Website conflict review failed; keyboard practice remains available.")
+                        except subprocess.TimeoutExpired as error:
+                            log_timeout("shortcut_review", "browser_conflict_review", timeout=conflict_timeout, details=str(error))
+                            steps.append({"name": "browser-conflict-review", "command": conflict_command,
+                                          "returncode": 124, "stdout": "", "stderr": str(error)})
+                            browser_audit.setdefault("warnings", []).append("Website conflict review timed out; keyboard practice remains available.")
+                        except (OSError, subprocess.SubprocessError) as error:
+                            steps.append({"name": "browser-conflict-review", "command": conflict_command,
+                                          "returncode": 126, "stdout": "", "stderr": str(error)})
+                            browser_audit.setdefault("warnings", []).append("Website conflict review unavailable; keyboard practice remains available.")
                 if automatic:
                     # The user may have resumed work while resolving a card.
-                    try:
-                        wait_until_idle(minimum_idle,
-                            maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
-                            idle_provider=idle_provider,
-                            poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
-                            sleep_fn=sleep_fn)
-                    except (OSError, ValueError, TypeError) as error:
-                        return {"ok": False, "provider": provider, "failed_step": "idle-gate",
-                                "error": str(error), "steps": steps, "browser_audit": browser_audit}
+                    with track_slowdown("shortcut_review", f"wait_until_idle_after_conflict:{provider}:{name}", threshold=5.0):
+                        try:
+                            wait_until_idle(minimum_idle,
+                                maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
+                                idle_provider=idle_provider,
+                                poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
+                                sleep_fn=sleep_fn)
+                        except (OSError, ValueError, TypeError) as error:
+                            return {"ok": False, "provider": provider, "failed_step": "idle-gate",
+                                    "error": str(error), "steps": steps, "browser_audit": browser_audit}
 
         run_kwargs = {"capture_output": True, "text": True, "check": False}
         if provider == "keyboard" and name == "popup":
             run_kwargs["timeout"] = max(
                 0.1, float(config.get("shortcut_popup_timeout_seconds", 10 * 60))
             )
-        try:
-            completed = runner(command, **run_kwargs)
-        except subprocess.TimeoutExpired as error:
-            timed_out = provider == "keyboard" and name == "popup"
-            timeout = float(run_kwargs.get("timeout", error.timeout or 0))
-            detail = (
-                f"Keyboard shortcut popup timed out after {timeout:g} seconds; display may be uncertain."
-                if timed_out
-                else str(error)
-            )
-            steps.append({
-                "name": name,
-                "command": command,
-                "returncode": 124,
-                "stdout": "",
-                "stderr": detail,
-                "timed_out": timed_out,
-            })
-            return {
-                "ok": False,
-                "provider": provider,
-                "failed_step": name,
-                "error": detail,
-                "steps": steps,
-                "browser_audit": browser_audit,
-                "timed_out": timed_out,
-            }
-        except (OSError, subprocess.SubprocessError) as error:
-            steps.append({"name": name, "command": command, "returncode": 126, "stdout": "", "stderr": str(error)})
-            return {"ok": False, "provider": provider, "failed_step": name, "error": str(error), "steps": steps, "browser_audit": browser_audit}
+        with track_slowdown("shortcut_review", f"{provider}:{name}", threshold=5.0):
+            try:
+                completed = runner(command, **run_kwargs)
+            except subprocess.TimeoutExpired as error:
+                timed_out = provider == "keyboard" and name == "popup"
+                timeout = float(run_kwargs.get("timeout", error.timeout or 0))
+                detail = (
+                    f"Keyboard shortcut popup timed out after {timeout:g} seconds; display may be uncertain."
+                    if timed_out
+                    else str(error)
+                )
+                log_timeout("shortcut_review", f"{provider}:{name}", timeout=timeout, details=detail)
+                steps.append({
+                    "name": name,
+                    "command": command,
+                    "returncode": 124,
+                    "stdout": "",
+                    "stderr": detail,
+                    "timed_out": timed_out,
+                })
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "failed_step": name,
+                    "error": detail,
+                    "steps": steps,
+                    "browser_audit": browser_audit,
+                    "timed_out": timed_out,
+                }
+            except (OSError, subprocess.SubprocessError) as error:
+                steps.append({"name": name, "command": command, "returncode": 126, "stdout": "", "stderr": str(error)})
+                return {"ok": False, "provider": provider, "failed_step": name, "error": str(error), "steps": steps, "browser_audit": browser_audit}
         step = _step_result(name, command, completed)
         steps.append(step)
         if completed.returncode != 0:

@@ -130,10 +130,26 @@ unset _MAINT_SHOWN _MAINT_CURRENT_SCRIPT
 exec zsh
 ```
 
+## Tracking Slowdowns and Timeouts
+
+Whenever an idle maintenance command, process audit, or wait gate experiences a timeout or takes longer than its threshold, it is automatically logged with timing details to:
+
+- Structured slowdown log: `~/Library/Logs/idle-maintenance/slowdown.log`
+- Main application log: `~/Library/Logs/IdleMaintenance.log` (prefixed with `[SLOW]` or `[TIMEOUT]`)
+
+Inspect recent events:
+
+```bash
+tail -50 ~/Library/Logs/idle-maintenance/slowdown.log
+tail -50 ~/Library/Logs/IdleMaintenance.log | grep -E "\[SLOW\]|\[TIMEOUT\]"
+```
+
+You can also run `./maintenance_status.py` to view recent slowdown and timeout summaries directly in the status report.
+
 ## Health Check Commands
 
 ```bash
-python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_interactive.py prompt-suggest.py
+python3 -m py_compile idle_config.py idle_watcher.py app_auditor.py maintenance_interactive.py prompt-suggest.py maintenance_logger.py
 swiftc -typecheck prompt.swift
 swiftc -typecheck app_usage_watcher.swift
 launchctl print gui/$(id -u)/com.john.idle-maintenance

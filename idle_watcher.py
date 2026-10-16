@@ -7,6 +7,7 @@ import time
 
 from idle_config import APP_SUPPORT_DIR, get_handoff_app, get_handoff_url, load_config
 from idle_gate import idle_window_contains, read_idle_seconds
+from maintenance_logger import log_slowdown, log_timeout, track_slowdown
 from shortcut_review import normalize_command
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,14 +62,16 @@ def review_cooldown_transition(
 
 
 def _run_return_command(command, *, command_runner):
-    try:
-        result = command_runner(command, check=False)
-    except (OSError, subprocess.SubprocessError) as error:
-        return {
-            "command": command,
-            "returncode": 127,
-            "error": str(error),
-        }
+    cmd_name = command[0] if isinstance(command, (list, tuple)) and command else str(command)
+    with track_slowdown("idle_watcher", f"return_command:{cmd_name}", threshold=2.0):
+        try:
+            result = command_runner(command, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            return {
+                "command": command,
+                "returncode": 127,
+                "error": str(error),
+            }
 
     returncode = int(getattr(result, "returncode", 0))
     return {
@@ -120,7 +123,8 @@ def trigger_maintenance(
     interactive_script = os.path.join(BASE_DIR, "maintenance_interactive.py")
     child_env = os.environ.copy()
     child_env.pop("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW", None)
-    command_runner(["/usr/bin/python3", interactive_script], check=False, env=child_env)
+    with track_slowdown("idle_watcher", "maintenance_interactive.py", threshold=5.0):
+        command_runner(["/usr/bin/python3", interactive_script], check=False, env=child_env)
 
     config = load_config(BASE_DIR)
     focus_command = normalize_command(
@@ -129,21 +133,24 @@ def trigger_maintenance(
     focus_error = ""
     focus_returncode = 127
     if focus_command:
-        try:
-            focus_result = command_runner(focus_command, check=False)
-            focus_returncode = int(focus_result.returncode)
-        except (OSError, subprocess.SubprocessError) as error:
-            focus_error = str(error)
+        with track_slowdown("idle_watcher", "return_focus_command", threshold=2.0):
+            try:
+                focus_result = command_runner(focus_command, check=False)
+                focus_returncode = int(focus_result.returncode)
+            except (OSError, subprocess.SubprocessError) as error:
+                focus_error = str(error)
     if focus_returncode != 0:
         # Preserve the existing handoff as a fail-safe when Hammerspoon or the
         # configured coordinator cannot be launched.
         target_url = get_handoff_url(config)
         if target_url:
-            command_runner(["open", target_url], check=False)
+            with track_slowdown("idle_watcher", "fallback_open_url", threshold=2.0):
+                command_runner(["open", target_url], check=False)
         else:
             target_app = get_handoff_app(config)
             if target_app:
-                command_runner(["open", "-a", target_app], check=False)
+                with track_slowdown("idle_watcher", f"fallback_open_app:{target_app}", threshold=2.0):
+                    command_runner(["open", "-a", target_app], check=False)
 
     page_review = open_return_page_review(
         config,

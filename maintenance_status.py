@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from idle_config import is_terminal_suggestion_time, keep_entry_is_active, load_config
+from maintenance_logger import load_recent_slowdowns
 
 LAUNCHD_LABEL = "com.john.idle-maintenance"
 MONITOR_LABEL = "com.john.idle-maintenance-monitor"
@@ -302,6 +303,19 @@ def render_text(status: dict[str, Any]) -> str:
             f"{float(latest_investigation.get('confidence') or 0):.0%} confidence): "
             f"{' '.join(str(latest_investigation.get('summary') or '').split())[:300]}"
         )
+    recent_slowdowns = status.get("recent_slowdowns", [])
+    if recent_slowdowns:
+        lines.extend(["", "Recent timeouts and slowdowns:"])
+        for item in recent_slowdowns:
+            t_type = str(item.get("type", "slowdown")).upper()
+            dt = str(item.get("datetime") or "")
+            comp = str(item.get("component") or "")
+            op = str(item.get("operation") or "")
+            dur = item.get("duration") if item.get("duration") is not None else item.get("timeout")
+            dur_str = f"{dur:.2f}s" if isinstance(dur, (int, float)) else str(dur)
+            details = str(item.get("details") or "")
+            detail_str = f" ({details})" if details else ""
+            lines.append(f"- [{t_type}] {dt} {comp}: {op} ({dur_str}){detail_str}")
     runner_output = runner.get("status_output", "").strip()
     if runner_output:
         lines.extend(["", "Runner details:", runner_output])
@@ -369,6 +383,7 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             "available_now": is_terminal_suggestion_time(config, datetime.fromtimestamp(now)),
             "window": "always" if start == end else f"{start:02d}:00–{end:02d}:00",
         },
+        "recent_slowdowns": load_recent_slowdowns(limit=5, path=home / "Library/Logs/idle-maintenance/slowdown.log"),
     }
     status["text"] = render_text(status)
     return status
