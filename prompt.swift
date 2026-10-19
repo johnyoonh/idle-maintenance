@@ -446,6 +446,11 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             openCurrentApp()
             return
         }
+        if action.result == "INVESTIGATE" && !copyText.isEmpty {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            _ = pasteboard.setString(copyText, forType: .string)
+        }
         if let confirmation = action.confirmation {
             let alert = NSAlert()
             alert.alertStyle = action.result == "DELETE" ? .critical : .warning
@@ -476,6 +481,7 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func emit(_ result: String) {
         guard let data = "\(result)\n".data(using: .utf8) else { return }
         FileHandle.standardOutput.write(data)
+        fflush(stdout)
     }
 
     func finish(_ result: String) {
@@ -487,7 +493,7 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         guard reviewState == .reviewing else { return }
-        if sessionMode && result != "QUIT" {
+        if sessionMode && result != "QUIT" && pendingApprovals != 1 {
             beginTransition()
             emit(result)
             return

@@ -353,6 +353,59 @@ fi
         self.assertIn("Investigate this high-impact macOS process", payload["copyText"])
         self.assertIn("CPU samples: 1.0%", payload["headline"])
 
+    def test_process_cwd_prefers_in_process_reader_over_lsof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real_dir = os.path.realpath(directory)
+            with patch("maintenance_core.subprocess.run") as runner:
+                resolved = maintenance_core.process_cwd(
+                    {"pid": 42},
+                    cwd_reader=lambda pid: real_dir if pid == 42 else None,
+                )
+
+        self.assertEqual(resolved, real_dir)
+        runner.assert_not_called()
+
+    def test_clipboard_and_osascript_fallback_use_bounded_timeouts(self):
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("maintenance_core.subprocess.run", return_value=completed) as run:
+            copied = maintenance_core.copy_text_to_clipboard("synthetic prompt")
+        self.assertTrue(copied)
+        self.assertEqual(run.call_args.kwargs.get("timeout"), 2)
+
+        with (
+            patch("maintenance_core._terminal_notifier_path", return_value=None),
+            patch("maintenance_core.subprocess.run", return_value=completed) as notify_run,
+        ):
+            maintenance_core.notify_user("Title", "Body")
+        self.assertEqual(notify_run.call_args.kwargs.get("timeout"), 5)
+
+    def test_codex_event_hook_opens_terminal_before_recording_sqlite_event(self):
+        import activity_intelligence
+
+        call_order: list[str] = []
+
+        def fake_open(prompt_text, cwd="/", **kwargs):
+            call_order.append("open_terminal")
+            return True, "iTerm", True
+
+        core = SimpleNamespace(
+            BASE_DIR="/tmp/repo",
+            open_codex_in_terminal=fake_open,
+        )
+        activity_intelligence.install_codex_event_hook(core)
+        with (
+            patch("activity_intelligence.load_config", return_value={}),
+            patch(
+                "activity_intelligence.record_external_event",
+                side_effect=lambda *args, **kwargs: call_order.append("record_sqlite"),
+            ),
+        ):
+            result = core.open_codex_in_terminal("synthetic prompt", "/tmp")
+
+        self.assertEqual(result, (True, "iTerm", True))
+        self.assertEqual(call_order, ["open_terminal", "record_sqlite"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

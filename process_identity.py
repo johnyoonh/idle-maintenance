@@ -17,17 +17,69 @@ class RUsageInfoV2(ctypes.Structure):
     ]
 
 _LIBPROC = None
+_PROC_PIDVNODEPATHINFO = 9
+
+
+class _VNodeInfoPath(ctypes.Structure):
+    _fields_ = [
+        ("vip_vi", ctypes.c_byte * 152),
+        ("vip_path", ctypes.c_char * 1024),
+    ]
+
+
+class _ProcVNodePathInfo(ctypes.Structure):
+    _fields_ = [
+        ("pvi_cdir", _VNodeInfoPath),
+        ("pvi_rdir", _VNodeInfoPath),
+    ]
+
+
+def _get_libproc():
+    global _LIBPROC
+    if _LIBPROC is None:
+        _LIBPROC = ctypes.CDLL("libproc.dylib", use_errno=True)
+        _LIBPROC.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(RUsageInfoV2)]
+        _LIBPROC.proc_pid_rusage.restype = ctypes.c_int
+        _LIBPROC.proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        _LIBPROC.proc_pidinfo.restype = ctypes.c_int
+    return _LIBPROC
+
+
+def read_cwd(pid):
+    if sys.platform != "darwin":
+        return None
+    try:
+        libproc = _get_libproc()
+        info = _ProcVNodePathInfo()
+        ret = libproc.proc_pidinfo(
+            int(pid),
+            _PROC_PIDVNODEPATHINFO,
+            0,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if ret <= 0:
+            return None
+        cwd = info.pvi_cdir.vip_path.decode("utf-8", "replace").strip()
+        if cwd and os.path.isabs(cwd) and os.path.isdir(cwd):
+            return cwd
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+    return None
+
 
 def io_counters(pid):
-    global _LIBPROC
     if sys.platform != "darwin": return None
     try:
-        if _LIBPROC is None:
-            _LIBPROC = ctypes.CDLL("libproc.dylib", use_errno=True)
-            _LIBPROC.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(RUsageInfoV2)]
-            _LIBPROC.proc_pid_rusage.restype = ctypes.c_int
+        libproc = _get_libproc()
         info = RUsageInfoV2()
-        if _LIBPROC.proc_pid_rusage(int(pid), 2, ctypes.byref(info)): return None
+        if libproc.proc_pid_rusage(int(pid), 2, ctypes.byref(info)): return None
         return {"io_read_bytes": int(info.read), "io_write_bytes": int(info.written), "start_abstime": int(info.start)}
     except (OSError, AttributeError, TypeError, ValueError):
         return None

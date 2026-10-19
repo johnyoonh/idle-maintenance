@@ -4,6 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = (
     "activity_intelligence.py",
     "maint.py",
+    "maintenance_logger.py",
     "shortcut_review.py",
     "maintenance_status_extended.py",
     "process_triage.py",

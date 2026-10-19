@@ -137,6 +137,7 @@ def _handle_app_action(
 
 def _run_app_review() -> bool:
     """Run the app review stage while destructive work continues in a detached worker."""
+    _core.ensure_interactive_qos()
     with _interactive_lock() as acquired:
         if not acquired:
             _core.log("Already running (interactive lock active). Exiting.")
@@ -307,6 +308,7 @@ def _start_activity_intelligence() -> None:
 
 
 def main(argv: list[str] | None = None) -> Any:
+    _core.ensure_interactive_qos()
     args = list(sys.argv[1:] if argv is None else argv)
     _should_review_shortcuts = False
     try:

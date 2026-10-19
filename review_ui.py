@@ -9,7 +9,7 @@ from typing import Any
 
 from idle_config import keep_entry_is_active
 from process_review import next_process_keep_delay_days, process_keep_is_active, record_process_keep
-from prompt_session import ask_review
+from prompt_session import ask_review, close_review_session
 
 
 def _cpu_samples(proc: dict[str, Any]) -> list[float]:
@@ -286,6 +286,7 @@ def run_process_audit(
         if not proc or core.queue_item_is_snoozed(item, snooze):
             continue
         keep_days = next_process_keep_delay_days(config, whitelist, proc)
+        remaining = max(1, run_pending - done)
         action = prompt_process(
             core,
             pr,
@@ -293,12 +294,15 @@ def run_process_audit(
             snooze,
             keep_days,
             config=config,
-            pending=max(1, run_pending - done),
+            pending=remaining,
         )
         if action == "QUIT":
+            close_review_session(core.BASE_DIR)
             core.save_json(core.PROCESS_QUEUE_PATH, current)
             core.save_json(core.PROCESS_WHITELIST_PATH, whitelist)
             return False, done
+        if remaining <= 1:
+            close_review_session(core.BASE_DIR)
         if action == "KEEP":
             record_process_keep(whitelist, proc, core.record_keep)
             current = [x for x in current if x["process_key"] != item["process_key"]]

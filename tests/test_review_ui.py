@@ -187,6 +187,61 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(pending, 2)
         runner.assert_not_called()
 
+    def test_final_process_review_closes_session_before_post_action_work(self):
+        call_order: list[str] = []
+        proc = {
+            "pid": 42,
+            "process_key": "process:example",
+            "comm": "/usr/libexec/example",
+            "command": "/usr/libexec/example",
+            "cpu": 0.0,
+            "cpu_samples": [0.0],
+            "io_samples": [{"total_mib_s": 28.0, "write_mib_s": 4.0}],
+            "etime": "00:10:00",
+            "reason": "high I/O",
+        }
+        core = SimpleNamespace(
+            BASE_DIR="/repo",
+            DEFAULT_MAX_PROMPTS=5,
+            PROCESS_QUEUE_PATH="/process_queue.json",
+            PROCESS_WHITELIST_PATH="/process_whitelist.json",
+            QUEUE_PATH="/queue.json",
+            WHITELIST_PATH="/whitelist.json",
+            load_json=lambda path: [],
+            load_custom_whitelist=lambda path: {},
+            save_json=lambda path, data: None,
+            queue_item_is_snoozed=lambda item, hours: False,
+            record_keep=lambda whitelist, key: None,
+        )
+        pr = SimpleNamespace(
+            ATTRIBUTION_NOTE="attribution note",
+            get_candidate_processes=lambda config: [proc],
+            known_process_guidance=lambda value: {},
+            triage_process=lambda value, guidance, config: {"decision": "review", "reason": "high I/O"},
+            _display=lambda value: "example",
+            _known_context=lambda value: [],
+            process_action_policy=lambda value: "protected",
+            investigation_prompt=lambda core_value, value, config: "prompt",
+            handle_process_action=lambda core_value, value, action, config: call_order.append(f"handle:{action}"),
+        )
+
+        with (
+            patch("review_ui.ask_review", return_value="INVESTIGATE"),
+            patch("review_ui.close_review_session", side_effect=lambda base_dir: call_order.append("close_session")),
+        ):
+            ok, count = review_ui.run_process_audit(
+                core,
+                pr,
+                {"process_max_prompts": 1, "max_prompts": 1},
+                prompt_budget=1,
+                planned_app_output=[],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(count, 1)
+        self.assertEqual(call_order, ["close_session", "handle:INVESTIGATE"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

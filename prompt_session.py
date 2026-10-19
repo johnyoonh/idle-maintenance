@@ -101,6 +101,7 @@ class PromptSession:
         process = self.process
         if process is not None and process.poll() is None:
             return process
+        _ensure_interactive_qos()
         if self.command is None:
             self.command = prompt_command(self.base_dir)
         process = self.runner(
@@ -158,6 +159,15 @@ class PromptSession:
 _SESSIONS: dict[str, PromptSession] = {}
 
 
+def _ensure_interactive_qos() -> None:
+    try:
+        from maintenance_core import ensure_interactive_qos
+
+        ensure_interactive_qos()
+    except Exception:
+        pass
+
+
 def get_session(base_dir: str) -> PromptSession:
     key = os.path.abspath(base_dir)
     session = _SESSIONS.get(key)
@@ -169,6 +179,7 @@ def get_session(base_dir: str) -> PromptSession:
 
 def legacy_prompt(base_dir: str, payload: dict[str, Any]) -> str:
     """Fallback to the historical one-window-per-question invocation."""
+    _ensure_interactive_qos()
     command = [
         *prompt_command(base_dir),
         str(payload.get("name", "")),

@@ -49,6 +49,12 @@ class PromptSwiftTests(unittest.TestCase):
         self.assertIn('#"(\\d+(?:\\.\\d+)?)%"#', text)
         self.assertIn('#"(\\d+(?:\\.\\d+)?)\\s+MiB/s"#', text)
 
+    def test_final_session_approval_terminates_immediately_and_investigate_copies_prompt(self):
+        text = (ROOT / "prompt.swift").read_text(encoding="utf-8")
+        self.assertIn('if sessionMode && result != "QUIT" && pendingApprovals != 1 {', text)
+        self.assertIn('if action.result == "INVESTIGATE" && !copyText.isEmpty {', text)
+
 
 if __name__ == "__main__":
     unittest.main()
+

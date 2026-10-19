@@ -41,6 +41,38 @@ PROCESS_WHITELIST_PATH = os.path.join(STATE_DIR, "process_whitelist.json")
 DELETION_LEDGER_PATH = os.path.join(STATE_DIR, "app-deletions.jsonl")
 DEFAULT_MAX_PROMPTS = int(DEFAULT_CONFIG["max_prompts"])
 
+_DARWIN_LIBC = None
+_PRIO_DARWIN_PROCESS = 4
+_IOPOL_TYPE_DISK = 0
+_IOPOL_SCOPE_PROCESS = 0
+_IOPOL_DEFAULT = 0
+
+
+def ensure_interactive_qos():
+    """Clear inherited Darwin background/throttled I/O policy for interactive work."""
+    global _DARWIN_LIBC
+    if sys.platform != "darwin":
+        return False
+    cleared = False
+    try:
+        if os.getpriority(_PRIO_DARWIN_PROCESS, 0) != 0:
+            os.setpriority(_PRIO_DARWIN_PROCESS, 0, 0)
+            cleared = True
+    except OSError:
+        pass
+    try:
+        if _DARWIN_LIBC is None:
+            import ctypes
+
+            _DARWIN_LIBC = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        if _DARWIN_LIBC.getiopolicy_np(_IOPOL_TYPE_DISK, _IOPOL_SCOPE_PROCESS) != _IOPOL_DEFAULT:
+            _DARWIN_LIBC.setiopolicy_np(_IOPOL_TYPE_DISK, _IOPOL_SCOPE_PROCESS, _IOPOL_DEFAULT)
+            cleared = True
+    except Exception:
+        pass
+    return cleared
+
+
 def _terminal_notifier_path():
     discovered = shutil.which("terminal-notifier")
     if discovered:
@@ -55,6 +87,7 @@ def _terminal_notifier_path():
 
 
 def notify_user(title, message, *, click_path=None):
+    ensure_interactive_qos()
     if click_path is not None:
         notifier = _terminal_notifier_path()
         if notifier:
@@ -106,6 +139,7 @@ end run
             input=script,
             capture_output=True,
             text=True,
+            timeout=5,
         )
     except Exception:
         pass
@@ -552,18 +586,36 @@ def build_process_investigation_prompt(proc):
             lines.append(f"- Notes: {offender_summary}")
     return "\n".join(lines)
 
+_STDLIB_SUBPROCESS_RUN = subprocess.run
+
+
 def copy_text_to_clipboard(text):
+    ensure_interactive_qos()
     try:
-        subprocess.run(["pbcopy"], input=text, text=True, check=True)
+        subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=2)
         return True
     except Exception as e:
         log(f"Failed to copy investigation prompt to clipboard: {e}")
         return False
 
-def process_cwd(proc, default="/"):
+def process_cwd(proc, default="/", *, cwd_reader=None):
+    pid = proc.get("pid") if isinstance(proc, dict) else None
+    if pid is not None and (cwd_reader is not None or subprocess.run is _STDLIB_SUBPROCESS_RUN):
+        try:
+            reader = cwd_reader
+            if reader is None:
+                from process_identity import read_cwd
+
+                reader = read_cwd
+            resolved = reader(pid)
+            if resolved and os.path.isabs(resolved) and os.path.isdir(resolved):
+                return resolved
+        except Exception:
+            pass
+    ensure_interactive_qos()
     try:
         result = subprocess.run(
-            ["lsof", "-a", "-p", str(proc["pid"]), "-d", "cwd", "-Fn"],
+            ["lsof", "-n", "-P", "-a", "-p", str(proc["pid"]), "-d", "cwd", "-Fn"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -685,6 +737,7 @@ def open_codex_in_terminal(
     capture_script=None,
 ):
     """Open an investigation in a new terminal tab without Apple Events/TCC."""
+    ensure_interactive_qos()
     prompt_copied = clipboard_fn(prompt_text)
     try:
         launch_file = create_codex_launch_file(
