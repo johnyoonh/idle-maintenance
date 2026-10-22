@@ -151,6 +151,18 @@ Logs:
 
 Deferral log lines include current power source, idle seconds, and 1-minute load so it is clear why work did not run.
 
+## Guarded Time Machine backups (opt-in)
+
+Apple Time Machine backups can be gated on 8 PM–7 AM local time, 30 minutes of
+keyboard inactivity, AC power, low load and disk activity, and one successful
+backup per 24 hours. The existing Wiki Automation idle monitor launches a
+one-shot worker; there is no new LaunchAgent or resident process. The feature
+is **disabled by default** until native backup success is verified on your Mac.
+
+See [docs/time-machine-backup.md](docs/time-machine-backup.md) for configuration,
+verification, alerts, and safe rollback. Apple's automatic backup frequency must
+be switched to Manual separately **after** verifying this scheduler, not before.
+
 ## App Cleanup Policy
 
 App cleanup is intentionally configurable. The project owns the cleanup lifecycle:
