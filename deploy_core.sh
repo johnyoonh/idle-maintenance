@@ -35,6 +35,7 @@ cp shortcut_review.py "$DEST/"
 cp storage_cleanup.py "$DEST/"
 cp storage_cleanup_core.py "$DEST/"
 cp disk_activity.py "$DEST/"
+cp time_machine_backup.py "$DEST/"
 
 # Prefer a precompiled helper while retaining prompt.swift as the runtime
 # fallback for systems where the compiler is unavailable.
