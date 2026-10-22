@@ -1,0 +1,32 @@
+name: Time Machine idle backup tests
+
+on:
+  pull_request:
+    paths:
+      - "time_machine_backup.py"
+      - "idle_config.py"
+      - "idle_gate.py"
+      - "tests/test_time_machine_backup.py"
+      - ".github/workflows/time-machine-backup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "time_machine_backup.py"
+      - "idle_config.py"
+      - "idle_gate.py"
+      - "tests/test_time_machine_backup.py"
+      - ".github/workflows/time-machine-backup-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  policy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax-check worker and config
+        run: python -m compileall -q time_machine_backup.py idle_config.py idle_gate.py
+      - name: Test guarded Time Machine policy (mocked macOS commands)
+        run: python -m unittest discover -s tests -p 'test_time_machine_backup.py' -v
