@@ -86,6 +86,8 @@ DEFAULT_CONFIG = {
     "activity_intelligence_diagnosis_model": "gpt-5-mini",
     "activity_intelligence_notification_confidence": 0.75,
     "activity_intelligence_worsening_multiplier": 1.5,
+    "activity_intelligence_novel_incident_peak_multiplier": 4.0,
+    "activity_intelligence_remediation_confidence": 0.95,
     "activity_intelligence_failure_retry_minutes": 30,
     "system_disk_sample_seconds": 1,
     "return_from_away_minutes": 15,

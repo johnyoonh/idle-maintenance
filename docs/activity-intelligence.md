@@ -27,16 +27,25 @@ Sanitized canonical summaries use `text-embedding-3-small` with 512 dimensions. 
 
 ## Strategic diagnosis
 
-The default gate opens when either condition is true:
+The default gate opens when any condition is true:
 
 1. three similar incidents occur within seven days; or
-2. two similar incidents occur within 24 hours and the latest peak is at least 1.5 times the earlier median.
+2. two similar incidents occur within 24 hours and the latest peak is at least 1.5 times the earlier median; or
+3. one incident has no similar event in the lookback window and its process I/O peak is at least four times the configured incident threshold (80 MiB/s total or 40 MiB/s writes with defaults).
 
 Similarity defaults to `0.82`. A cluster is diagnosed at most once per 24 hours, and all clusters share a four-diagnosis daily budget.
 
+Growing incidents refresh their stored peaks and are reconsidered when severity increases; an already diagnosed incident is not diagnosed again for a higher peak.
+
+A single-incident diagnosis is explicitly framed as uncertain evidence, not a confirmed cause. `activity_intelligence_novel_incident_peak_multiplier` controls the severity multiplier; the total and write thresholds use `process_high_io_total_mib_per_second` and `process_high_io_write_mib_per_second`.
+
 Completed investigations feed the next pattern decision. Two identity-linked `normal` outcomes with confidence of at least `0.75`, and no conflicting `actionable` outcome, suppress a matching false-positive pattern without calling the diagnosis model. Actionable or uncertain outcomes are added to the evidence supplied to the next diagnosis so the suggestion starts from observations already completed by the user. A single investigation can never suppress a pattern.
 
-Diagnosis uses the OpenAI Responses API with `store=false`, no tools, and a strict JSON Schema. The response includes a summary, causes, evidence, remedies, verification step, confidence, urgency, and uncertainty. Only a diagnosis with confidence at least `0.75` and a concrete reversible remedy creates a notification. No remedy is executed automatically.
+Diagnosis uses the OpenAI Responses API with `store=false`, no tools, and a strict JSON Schema. The response includes a summary, causes, evidence, remedies, verification step, confidence, urgency, and uncertainty. Only a diagnosis with confidence at least `0.75` and a concrete reversible remedy creates a notification. Model text is never interpreted as a command.
+
+Automatic remediation is available only through `DEFAULT_REMEDIATION_ACTIONS` in `activity_intelligence.py`. Each registered action must use a deterministic incident/diagnosis matcher and provide bounded execution, authoritative verification, and rollback callbacks; action callbacks receive a monotonic deadline and must honor it. Remediation requires confidence of at least `activity_intelligence_remediation_confidence` (default `0.95`). The event/action pair is recorded as running before execution, and an uncertain running action is verified before any recovery attempt after restart. Failed verification triggers rollback; an unsuccessful rollback is recorded as `recovery_required`. `maint status` exposes the latest outcome.
+
+The production registry starts empty because current resource incidents have no vetted unattended correction and the resource monitor prohibits automatic process termination. New actions must preserve that boundary; adding an action is a code change that requires its own tests and safety review.
 
 A transient diagnosis failure leaves its spike pending and pauses further model attempts for 30 minutes. The worker continues ingesting local observations during that interval and retries later instead of consuming the failed event or repeatedly calling the model.
 
@@ -61,4 +70,4 @@ python3 activity_intelligence.py process
 
 ## Retention and safety
 
-Observations are bounded to 10,000 rows and 180 days. Cluster diagnoses remain for one year. The prompt treats all observations as untrusted data and forbids automatic commands, settings changes, process termination, or definitive physical-disk attribution. Protected-process policy remains authoritative over any generated suggestion.
+Observations are bounded to 10,000 rows and 180 days. Cluster diagnoses and remediation outcomes remain for one year. The prompt treats all observations as untrusted data and forbids model-selected commands, settings changes, process termination, or definitive physical-disk attribution. Protected-process policy remains authoritative over any generated suggestion.

@@ -281,12 +281,13 @@ def render_text(status: dict[str, Any]) -> str:
         )
     latest_diagnosis = intelligence.get("latest") if isinstance(intelligence, dict) else None
     latest_investigation = intelligence.get("latest_investigation") if isinstance(intelligence, dict) else None
+    latest_remediation = intelligence.get("latest_remediation") if isinstance(intelligence, dict) else None
     health = intelligence.get("health") if isinstance(intelligence, dict) else {}
     lines.extend(
         [
             "",
             "Pattern intelligence:",
-            f"- Vector backend: {health.get('vector_backend') or 'not-started'}; stored events: {intelligence.get('events', 0)}; investigation summaries: {intelligence.get('investigation_summaries', 0)}; pending spikes: {intelligence.get('pending_spikes', 0)}",
+            f"- Vector backend: {health.get('vector_backend') or 'not-started'}; stored events: {intelligence.get('events', 0)}; investigation summaries: {intelligence.get('investigation_summaries', 0)}; pending spikes: {intelligence.get('pending_spikes', 0)}; remediation records: {intelligence.get('stored_remediations', 0)}",
             f"- Worker error: {health.get('last_error') or health.get('embedding_error') or 'none'}",
         ]
     )
@@ -302,6 +303,11 @@ def render_text(status: dict[str, Any]) -> str:
             f"- Latest investigation ({latest_investigation.get('classification', 'uncertain')}, "
             f"{float(latest_investigation.get('confidence') or 0):.0%} confidence): "
             f"{' '.join(str(latest_investigation.get('summary') or '').split())[:300]}"
+        )
+    if isinstance(latest_remediation, dict):
+        lines.append(
+            f"- Latest remediation ({latest_remediation.get('status', 'unknown')}): "
+            f"{latest_remediation.get('action_id', 'unknown action')}"
         )
     recent_slowdowns = status.get("recent_slowdowns", [])
     if recent_slowdowns:
@@ -364,8 +370,10 @@ def collect_status(config=None, command_runner=subprocess.run, home=None, now=No
             "stored_diagnoses": 0,
             "pending_spikes": 0,
             "investigation_summaries": 0,
+            "stored_remediations": 0,
             "latest_investigation": None,
             "latest": None,
+            "latest_remediation": None,
             "health": {"last_error": str(error)[:500], "vector_backend": "unavailable"},
         }
     status = {

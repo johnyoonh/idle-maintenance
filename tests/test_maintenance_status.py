@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import maintenance_status
+from activity_intelligence import VectorEventStore
 
 
 class MaintenanceStatusTests(unittest.TestCase):
@@ -113,6 +114,32 @@ class MaintenanceStatusTests(unittest.TestCase):
 
         self.assertFalse(status["runner"]["status_command_available"])
         self.assertIn("No runner command", status["runner"]["status_error"])
+
+    def test_status_shows_latest_registered_remediation_outcome(self):
+        with VectorEventStore(self.support / "activity-intelligence.sqlite3") as store:
+            store.start_remediation(
+                event_id="idle-maintenance:synthetic-incident",
+                action_id="synthetic-fix",
+                at=self.now,
+            )
+            store.finish_remediation(
+                event_id="idle-maintenance:synthetic-incident",
+                action_id="synthetic-fix",
+                status="verified",
+                at=self.now,
+            )
+
+        status = maintenance_status.collect_status(
+            config=self.config,
+            command_runner=self.runner,
+            home=self.home,
+            now=self.now,
+        )
+
+        self.assertEqual(
+            status["pattern_intelligence"]["latest_remediation"]["status"], "verified"
+        )
+        self.assertIn("Latest remediation (verified): synthetic-fix", status["text"])
 
 
 if __name__ == "__main__":
