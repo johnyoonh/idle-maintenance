@@ -131,6 +131,7 @@ class TimeMachinePolicyTests(unittest.TestCase):
         self.assertEqual("not_on_ac", self.run_policy()["reason"])
 
     def test_cpu_and_disk_gates(self):
+        self.runner.latest = [OLD]
         self.assertEqual(
             "cpu_busy", self.run_policy(load_reader=lambda: (5.0, 0, 0))["reason"]
         )
@@ -144,6 +145,7 @@ class TimeMachinePolicyTests(unittest.TestCase):
         )
 
     def test_destination_and_native_status_are_fail_closed(self):
+        self.runner.latest = [OLD]
         self.runner.destination = False
         self.assertEqual("destination_unavailable", self.run_policy()["reason"])
         self.runner.destination = True
