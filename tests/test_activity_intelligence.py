@@ -14,6 +14,7 @@ from activity_intelligence import (
     DiagnosisResult,
     INVESTIGATION_SUMMARY_PREFIX,
     OpenAIAPI,
+    RemediationAction,
     VectorEventStore,
     app_usage_context,
     capture_investigation_summary,
@@ -226,6 +227,191 @@ class ActivityIntelligenceTests(unittest.TestCase):
         self.assertEqual(result["diagnoses"], 0)
         self.assertEqual(diagnoser.prompts, [])
         self.assertEqual(notifications, [])
+
+    def test_active_incident_escalation_is_diagnosed_once(self):
+        diagnoser = FakeDiagnoser()
+        incident = self.incident(1, peak=30)
+        incident["status"] = "active"
+        def cycle():
+            self.write_state([incident])
+            return run_cycle(
+                self.config, db_path=self.db, resource_state_path=self.state,
+                app_usage_path=self.usage, report_path=self.report,
+                diagnoser=diagnoser, notify_fn=lambda *_args: None,
+                now_fn=lambda: self.clock,
+            )
+        self.assertEqual(cycle()["diagnoses"], 0)
+        incident.update(peak_total_mib_s=120, peak_write_mib_s=60)
+        self.assertEqual(cycle()["diagnoses"], 1)
+        self.assertEqual(cycle()["diagnoses"], 0)
+        incident.update(peak_total_mib_s=150, peak_write_mib_s=75)
+        self.assertEqual(cycle()["diagnoses"], 0)
+        self.assertEqual(len(diagnoser.prompts), 1)
+        with VectorEventStore(self.db) as store:
+            self.assertEqual(store.event_by_id("idle-maintenance:incident-1")["payload"]["peak_total_mib_s"], 150)
+
+    def test_novel_severe_spike_triggers_individual_diagnosis(self):
+        class SuggestedDiagnoser(FakeDiagnoser):
+            def diagnose(self, prompt):
+                self.prompts.append(prompt)
+                diagnosis = {
+                    "summary": "A novel high I/O event.",
+                    "likely_causes": [],
+                    "remedies": ["try a synthetic unregistered command"],
+                    "evidence": ["one severe incident"],
+                    "verification": "Check whether the incident recurs.",
+                    "confidence": 0.99,
+                    "urgency": "medium",
+                    "uncertainty": "Only one sample is available.",
+                }
+                return DiagnosisResult(True, "A novel high I/O event.", diagnosis=diagnosis)
+
+        diagnoser = SuggestedDiagnoser()
+        severe = self.incident(1, peak=100)
+        severe["recurrence"] = False
+        self.write_state([severe])
+
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=diagnoser,
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["diagnoses"], 1)
+        self.assertEqual(len(diagnoser.prompts), 1)
+        self.assertIn("one novel severe", diagnoser.prompts[0])
+        self.assertEqual(result["remediations"], 0)
+        self.assertIsNone(status(self.db)["latest_remediation"])
+        self.assertEqual(status(self.db)["latest"]["event_ids"], ["idle-maintenance:incident-1"])
+
+    def test_registered_reversible_remediation_is_verified_and_idempotent(self):
+        class ActionableDiagnoser(FakeDiagnoser):
+            def diagnose(self, prompt):
+                self.prompts.append(prompt)
+                diagnosis = {
+                    "summary": "A bounded test diagnosis.",
+                    "likely_causes": ["synthetic cause"],
+                    "remedies": ["apply a registered synthetic correction"],
+                    "evidence": ["one high severity incident"],
+                    "verification": "Check the synthetic state.",
+                    "confidence": 0.99,
+                    "urgency": "medium",
+                    "uncertainty": "",
+                }
+                return DiagnosisResult(True, "A bounded test diagnosis.", diagnosis=diagnosis)
+
+        calls = []
+        action = RemediationAction(
+            action_id="synthetic-reversible-fix",
+            matches=lambda event, diagnosis: (
+                event["payload"].get("process") == "fileproviderd"
+                and diagnosis["confidence"] >= 0.95
+            ),
+            execute=lambda event, diagnosis, _deadline: calls.append("execute") or {"changed": True},
+            verify=lambda _event, _diagnosis, result, _deadline: result == {"changed": True},
+            rollback=lambda _event, _diagnosis, _result, _deadline: calls.append("rollback") or True,
+        )
+        severe = self.incident(1, peak=100)
+        severe["recurrence"] = False
+        self.write_state([severe])
+
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=ActionableDiagnoser(),
+            remediation_actions=[action],
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["remediations"], 1)
+        self.assertEqual(calls, ["execute"])
+        self.assertEqual(status(self.db)["latest_remediation"]["status"], "verified")
+
+    def test_unverified_remediation_rolls_back_and_records_outcome(self):
+        class ActionableDiagnoser(FakeDiagnoser):
+            def diagnose(self, prompt):
+                self.prompts.append(prompt)
+                return DiagnosisResult(True, "Synthetic diagnosis.", diagnosis={"confidence": 0.99})
+
+        calls = []
+        action = RemediationAction(
+            action_id="synthetic-failed-fix",
+            matches=lambda _event, _diagnosis: True,
+            execute=lambda _event, _diagnosis, _deadline: calls.append("execute") or {"changed": True},
+            verify=lambda *_args: False,
+            rollback=lambda *_args: calls.append("rollback") or True,
+        )
+        severe = self.incident(1, peak=100)
+        severe["recurrence"] = False
+        self.write_state([severe])
+
+        result = run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=ActionableDiagnoser(),
+            remediation_actions=[action],
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock,
+        )
+
+        self.assertEqual(result["remediations"], 1)
+        self.assertEqual(calls, ["execute", "rollback"])
+        self.assertEqual(status(self.db)["latest_remediation"]["status"], "rolled_back")
+
+    def test_running_remediation_is_verified_before_recovery_or_retry(self):
+        event = incident_event(self.incident(1, peak=100), app_usage_path=self.usage)
+        with VectorEventStore(self.db) as store:
+            store.add_event(event)
+            stored_event = store.event_by_id(event["event_id"])
+            store.add_diagnosis(
+                created_at=self.clock,
+                trigger_event_id=event["event_id"],
+                pattern_vector=stored_event["vector"],
+                event_ids=[event["event_id"]],
+                response="synthetic diagnosis",
+                diagnosis={"confidence": 0.99},
+            )
+            store.start_remediation(
+                event_id=event["event_id"], action_id="synthetic-reconcile", at=self.clock
+            )
+            store.mark_reviewed(event["event_id"], self.clock)
+
+        calls = []
+        action = RemediationAction(
+            action_id="synthetic-reconcile",
+            matches=lambda *_args: True,
+            execute=lambda *_args: calls.append("execute"),
+            verify=lambda _event, _diagnosis, result, _deadline: calls.append(("verify", result)) or True,
+            rollback=lambda *_args: calls.append("rollback") or True,
+        )
+        self.write_state([self.incident(1, peak=100)])
+
+        run_cycle(
+            self.config,
+            db_path=self.db,
+            resource_state_path=self.state,
+            app_usage_path=self.usage,
+            report_path=self.report,
+            diagnoser=FakeDiagnoser(),
+            remediation_actions=[action],
+            notify_fn=lambda *_args: None,
+            now_fn=lambda: self.clock + 1,
+        )
+
+        self.assertEqual(calls, [("verify", None)])
+        self.assertEqual(status(self.db)["latest_remediation"]["status"], "verified")
 
     def test_three_similar_spikes_trigger_one_smart_diagnosis(self):
         diagnoser = FakeDiagnoser()
