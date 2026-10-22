@@ -85,7 +85,8 @@ def _latest_backup(runner: Callable[..., Any]) -> str | None:
     if result.returncode:
         return None
     paths = (result.stdout or "").strip().splitlines()
-    return paths[-1].strip() if paths else None
+    latest = paths[-1].strip() if paths else ""
+    return latest if latest.startswith("/") and BACKUP_DATE.search(latest) else None
 
 
 def _destinations_configured(runner: Callable[..., Any]) -> bool:
@@ -219,7 +220,7 @@ def run_once(
             if epoch - baseline >= policy["overdue_hours"] * 3600:
                 if epoch - float(state.get("last_alert_at", 0)) >= policy["alert_cooldown_hours"] * 3600:
                     try:
-                        notifier("Time Machine", "No confirmed backup in the last 48 hours. Check the backup disk.")
+                        notifier("Time Machine", f"No confirmed backup in the last {policy['overdue_hours']:g} hours. Check the backup disk.")
                     except Exception:
                         pass
                     state["last_alert_at"] = epoch
