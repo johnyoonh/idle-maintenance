@@ -692,10 +692,18 @@ class VectorEventStore:
             row = self.connection.execute("SELECT rowid FROM events WHERE event_id=?", (event_id,)).fetchone()
             if row is not None:
                 blob = struct.pack(f"{DIM}f", *[float(value) for value in vector])
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO event_vectors(rowid, embedding) VALUES(?, ?)",
-                    (int(row[0]), blob),
-                )
+                # vec0 virtual tables reject INSERT OR REPLACE when the rowid
+                # already exists, which crashes the whole cycle. Update first
+                # and fall back to insert for a freshly created event.
+                updated = self.connection.execute(
+                    "UPDATE event_vectors SET embedding=? WHERE rowid=?",
+                    (blob, int(row[0])),
+                ).rowcount
+                if not updated:
+                    self.connection.execute(
+                        "INSERT INTO event_vectors(rowid, embedding) VALUES(?, ?)",
+                        (int(row[0]), blob),
+                    )
         self.connection.commit()
         return inserted
 
