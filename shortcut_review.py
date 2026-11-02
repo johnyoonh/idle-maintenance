@@ -254,6 +254,7 @@ def _run_provider(
                 max(0.0, float(config.get("return_active_cutoff_seconds", 30))),
                 float(config.get("review_prompt_idle_seconds", 300)),
             )
+            popup_timeout = float(config.get("shortcut_popup_timeout_seconds", 600))
             with track_slowdown("shortcut_review", f"wait_until_idle:{provider}:{name}", threshold=5.0):
                 try:
                     wait_until_idle(
@@ -262,6 +263,7 @@ def _run_provider(
                         idle_provider=idle_provider,
                         poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
                         sleep_fn=sleep_fn,
+                        timeout=popup_timeout,
                     )
                 except (OSError, ValueError, TypeError) as error:
                     detail = str(error).strip() or type(error).__name__
@@ -302,13 +304,17 @@ def _run_provider(
                             browser_audit.setdefault("warnings", []).append("Website conflict review unavailable; keyboard practice remains available.")
                 if automatic:
                     # The user may have resumed work while resolving a card.
+                    popup_timeout = float(config.get("shortcut_popup_timeout_seconds", 600))
                     with track_slowdown("shortcut_review", f"wait_until_idle_after_conflict:{provider}:{name}", threshold=5.0):
                         try:
-                            wait_until_idle(minimum_idle,
+                            wait_until_idle(
+                                minimum_idle,
                                 maximum_seconds=float(config.get("review_prompt_idle_max_seconds", 0)),
                                 idle_provider=idle_provider,
                                 poll_interval=float(config.get("resource_monitor_idle_poll_seconds", 30)),
-                                sleep_fn=sleep_fn)
+                                sleep_fn=sleep_fn,
+                                timeout=popup_timeout,
+                            )
                         except (OSError, ValueError, TypeError) as error:
                             return {"ok": False, "provider": provider, "failed_step": "idle-gate",
                                     "error": str(error), "steps": steps, "browser_audit": browser_audit}

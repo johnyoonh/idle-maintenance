@@ -65,11 +65,13 @@ def wait_until_idle(
     poll_interval: float = 30,
     sleep_fn: Callable[[float], None] = time.sleep,
     slow_threshold: float = 10.0,
+    timeout: float | None = None,
 ) -> float:
     """Wait for a known HID sample to meet the configured idle window."""
     delay = max(1.0, float(poll_interval))
     start = time.perf_counter()
     last_warning = start
+    effective_timeout = timeout if timeout is not None else (maximum_seconds if maximum_seconds > 0 else None)
     while True:
         idle_seconds = idle_provider()
         now = time.perf_counter()
@@ -84,12 +86,12 @@ def wait_until_idle(
                     details=f"waited {elapsed:.1f}s for {minimum_seconds:.0f}s idle window",
                 )
             return float(idle_seconds)
-        if maximum_seconds > 0 and elapsed >= maximum_seconds:
+        if effective_timeout is not None and elapsed >= effective_timeout:
             log_timeout(
                 "idle_gate",
                 "wait_until_idle",
-                timeout=maximum_seconds,
-                details=f"target {minimum_seconds:.0f}s not reached within {maximum_seconds:.0f}s limit",
+                timeout=effective_timeout,
+                details=f"target {minimum_seconds:.0f}s not reached within {effective_timeout:.0f}s limit",
             )
             return float(idle_seconds) if idle_seconds is not None else 0.0
         if elapsed >= slow_threshold and (now - last_warning) >= 60.0:

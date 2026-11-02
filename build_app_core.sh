@@ -595,9 +595,9 @@ final class IdleMaintenanceApp: NSObject, NSApplicationDelegate {
             var text = ""
             do {
                 try process.run()
-                process.waitUntilExit()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
                 text = String(data: data, encoding: .utf8) ?? ""
                 if text.isEmpty {
                     text = String(data: errorData, encoding: .utf8) ?? "Status command produced no output."
