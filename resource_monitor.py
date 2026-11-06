@@ -194,6 +194,7 @@ class ResourceMonitor:
         self.idle_provider = idle_provider
         self.state = _read_json(self.state_path)
         self._windows: dict[str, list[dict[str, Any]]] = {}
+        self._history_dirty = True
         health = self.state.get("health") if isinstance(self.state.get("health"), dict) else {}
         self._last_persist_at = float(
             health.get("last_persisted_at") or health.get("last_sample_at") or 0
@@ -361,6 +362,7 @@ class ResourceMonitor:
             **fields,
         }
         append_history_record(self.history_path, record)
+        self._history_dirty = True
 
     def _incident_by_id(self, incident_id: str) -> dict[str, Any] | None:
         return next((item for item in self.state["incidents"] if item.get("id") == incident_id), None)
@@ -394,10 +396,12 @@ class ResourceMonitor:
         self.state["notifications"] = {
             key: value for key, value in notifications[-100:] if now - value <= cooldown * 2
         }
-        compact_bounded_jsonl(
-            self.history_path,
-            int(self.config.get("resource_monitor_history_limit", 500)),
-        )
+        if self._history_dirty:
+            compact_bounded_jsonl(
+                self.history_path,
+                int(self.config.get("resource_monitor_history_limit", 500)),
+            )
+            self._history_dirty = False
 
     def _qualified(self, interval: dict[str, Any]) -> bool:
         total_limit = float(self.config.get("process_high_io_total_mib_per_second", 20))

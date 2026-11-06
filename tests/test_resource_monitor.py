@@ -383,6 +383,11 @@ class ResourceMonitorTests(unittest.TestCase):
         last_record = json.loads(compacted_lines[-1])
         self.assertEqual(last_record["incident_id"], "burst-19")
 
+        # Subsequent idle prune ticks do not re-read or compact history when clean
+        with patch("resource_monitor.compact_bounded_jsonl") as mock_compact:
+            self.monitor._prune(self.clock + 10)
+            mock_compact.assert_not_called()
+
     def test_legacy_persisted_windows_are_discarded_and_compacted(self):
         legacy_state = {
             "schema_version": 1,
