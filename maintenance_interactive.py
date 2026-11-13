@@ -14,6 +14,7 @@ import app_actions as _app_actions
 import app_leftovers
 import maintenance_core as _core
 import process_review as _process_review
+import recommendations
 from idle_config import keep_entry_is_active, load_config, next_keep_delay_days
 from process_review import install as _install
 from prompt_session import close_review_session
@@ -296,7 +297,7 @@ def _run_app_review() -> bool:
                 processed += delta
 
         _persist_app_state(current_queue, whitelist)
-    return processed > 0
+    return True
 
 
 def _finish_shortcut_review() -> None:
@@ -304,9 +305,10 @@ def _finish_shortcut_review() -> None:
         return
     if os.environ.get("IDLE_MAINTENANCE_SKIP_SHORTCUT_REVIEW") == "1":
         return
-    config = load_config(_core.BASE_DIR)
+    config = dict(load_config(_core.BASE_DIR))
     if not config.get("show_shortcuts_on_finish", True):
         return
+    config.setdefault("shortcut_skip_idle_wait", True)
     with _core.track_slowdown("maintenance_interactive", "shortcut_review", threshold=5.0):
         result = run_shortcut_review(config, automatic=True)
     if not result.get("ok") or result.get("skipped"):
@@ -335,6 +337,10 @@ def main(argv: list[str] | None = None) -> Any:
         close_review_session(_core.BASE_DIR)
     if _should_review_shortcuts:
         _finish_shortcut_review()
+    try:
+        recommendations.sync_recommendations()
+    except Exception:
+        pass
     _start_activity_intelligence()
     return _result
 

@@ -54,6 +54,7 @@ def triage_process(
     peak_total_mib_s: float | None = None,
     peak_write_mib_s: float | None = None,
     recurrence: bool = False,
+    recurrence_count: int | None = None,
     window_count: int | None = None,
 ) -> dict[str, Any]:
     """Return suppress/review/log-only without authorizing any corrective action."""
@@ -101,12 +102,16 @@ def triage_process(
             "guidance": guidance,
         }
     if recurrence:
-        return {
-            "decision": "review",
-            "classification": "routine-known",
-            "reason": "Known routine work recurred within the review window.",
-            "guidance": guidance,
-        }
+        threshold_raw = cfg.get("process_routine_recurrence_threshold")
+        threshold = int(threshold_raw) if threshold_raw is not None else None
+        count = int(recurrence_count) if recurrence_count is not None else 1
+        if threshold is None or threshold <= 0 or count >= threshold:
+            return {
+                "decision": "review",
+                "classification": "routine-known",
+                "reason": "Known routine work recurred within the review window.",
+                "guidance": guidance,
+            }
 
     multiplier = _bounded_number(
         cfg.get("process_routine_review_multiplier", 4.0),
