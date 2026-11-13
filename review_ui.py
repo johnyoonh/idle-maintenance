@@ -4,6 +4,7 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
+import threading
 import time
 from typing import Any
 
@@ -56,8 +57,10 @@ def process_headline(proc: dict[str, Any]) -> str:
 
 def _process_detail(pr: Any, proc: dict[str, Any]) -> str:
     cpu = ", ".join(f"{x:.1f}%" for x in _cpu_samples(proc))
+    mem_mib = float(proc.get("memory_mib") or 0.0)
+    mem_suffix = f" • Mem {mem_mib:.0f} MiB" if mem_mib > 0 else ""
     detail = (
-        f"PID {proc['pid']} • CPU samples: {cpu} • Elapsed {proc.get('etime', '?')}\n"
+        f"PID {proc['pid']} • CPU samples: {cpu}{mem_suffix} • Elapsed {proc.get('etime', '?')}\n"
         f"Reason: {proc.get('reason', 'Matched resource policy')}"
     )
     rates = proc.get("io_samples", [])
@@ -278,6 +281,7 @@ def run_process_audit(
         stale_output=planned_app_output,
     )
     run_pending = process_pending + app_pending
+    background_actions: list[threading.Thread] = []
 
     for item in queue:
         if done >= limit:
@@ -298,6 +302,8 @@ def run_process_audit(
         )
         if action == "QUIT":
             close_review_session(core.BASE_DIR)
+            for worker in background_actions:
+                worker.join(timeout=6.0)
             core.save_json(core.PROCESS_QUEUE_PATH, current)
             core.save_json(core.PROCESS_WHITELIST_PATH, whitelist)
             return False, done
@@ -307,12 +313,23 @@ def run_process_audit(
             record_process_keep(whitelist, proc, core.record_keep)
             current = [x for x in current if x["process_key"] != item["process_key"]]
         else:
-            pr.handle_process_action(core, proc, action, config)
+            if action == "GRACEFUL_QUIT" and remaining > 1:
+                worker = threading.Thread(
+                    target=pr.handle_process_action,
+                    args=(core, dict(proc), action, config),
+                    daemon=True,
+                )
+                worker.start()
+                background_actions.append(worker)
+            else:
+                pr.handle_process_action(core, proc, action, config)
             for entry in current:
                 if entry["process_key"] == item["process_key"]:
                     entry["last_prompted"] = int(time.time())
         done += 1
 
+    for worker in background_actions:
+        worker.join(timeout=6.0)
     core.save_json(core.PROCESS_QUEUE_PATH, current)
     core.save_json(core.PROCESS_WHITELIST_PATH, whitelist)
     return True, done

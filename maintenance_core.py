@@ -412,9 +412,9 @@ def get_process_snapshot(config):
     return snapshot
 
 def get_candidate_processes(config, snapshot_provider=None, sleep_fn=time.sleep):
-    high_cpu_threshold = float(config.get("process_high_cpu_threshold", 50.0))
+    high_cpu_threshold = float(config.get("process_high_cpu_threshold", 75.0))
     long_running_hours = int(config.get("process_long_running_hours", 24))
-    long_running_min_cpu = float(config.get("process_long_running_min_cpu", 10.0))
+    long_running_min_cpu = float(config.get("process_long_running_min_cpu", 15.0))
     sample_count = max(1, int(config.get("process_cpu_sample_count", 3)))
     sample_interval = max(0.0, float(config.get("process_cpu_sample_interval_seconds", 30)))
     min_long_seconds = long_running_hours * 3600

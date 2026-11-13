@@ -31,15 +31,29 @@ struct ReviewPayload: Decodable {
 
 final class ActionButton: NSButton {
     var result = ""
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+}
+
+final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
-        styleMask: [.titled, .closable],
-        backing: .buffered,
-        defer: false
-    )
+    let window: KeyablePanel = {
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        return panel
+    }()
     let sessionMode: Bool
     var itemName: String
     var itemPath: String
@@ -240,11 +254,24 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return result
     }
 
+    func resolveIcon(for path: String) -> NSImage {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let candidate = trimmed.components(separatedBy: ".app/").first.map {
+                trimmed.contains(".app/") ? "\($0).app" : trimmed
+            } ?? trimmed
+            if FileManager.default.fileExists(atPath: candidate) {
+                return NSWorkspace.shared.icon(forFile: candidate)
+            }
+        }
+        return NSImage(named: NSImage.applicationIconName) ?? NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/Finder.app")
+    }
+
     func setupWindow() {
         let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = content
 
-        let icon = NSWorkspace.shared.icon(forFile: itemPath)
+        let icon = resolveIcon(for: itemPath)
         icon.size = NSSize(width: 56, height: 56)
         let image = NSImageView(frame: NSRect(x: 24, y: 300, width: 56, height: 56))
         image.image = icon
@@ -337,6 +364,7 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         reviewState = .reviewing
         transitionGeneration += 1
         canCloseOnUnfocus = false
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {

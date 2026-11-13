@@ -948,9 +948,166 @@ class RemediationAction:
             raise ValueError("remediation timeout must be between 0 and 30 seconds")
 
 
+def _pid_matches_patterns(pid: int, patterns: tuple[str, ...]) -> bool:
+    if pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            capture_output=True,
+            timeout=1.5,
+            check=False,
+        )
+    except Exception:
+        return False
+    cmd = (completed.stdout or "").strip().lower()
+    return bool(cmd and any(pat in cmd for pat in patterns))
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _terminate_verified_pid(pid: int, patterns: tuple[str, ...], deadline: float) -> dict[str, Any]:
+    if not _pid_matches_patterns(pid, patterns):
+        return {"pid": pid, "signaled": False}
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        return {"pid": pid, "signaled": False}
+    while time.monotonic() < deadline and _pid_is_alive(pid):
+        time.sleep(0.05)
+    return {"pid": pid, "signaled": True}
+
+
+def _match_automation_browser(event: dict[str, Any], diagnosis: dict[str, Any]) -> bool:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    text = " ".join(
+        [
+            str(event.get("summary") or ""),
+            str(payload.get("process") or ""),
+            str(payload.get("command") or ""),
+            " ".join(str(x) for x in diagnosis.get("remedies", [])),
+        ]
+    ).lower()
+    return any(tok in text for tok in ("--headless", "playwright", "puppeteer", "chromedriver"))
+
+
+def _execute_automation_browser(
+    event: dict[str, Any], _diagnosis: dict[str, Any], deadline: float
+) -> dict[str, Any]:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    pid = int(_float(payload.get("pid"), 0))
+    return _terminate_verified_pid(pid, ("--headless", "playwright", "puppeteer", "chromedriver"), deadline)
+
+
+def _verify_pid_stopped(
+    _event: dict[str, Any], _diagnosis: dict[str, Any], result: Any, _deadline: float
+) -> bool:
+    if isinstance(result, dict) and result.get("pid"):
+        return not _pid_is_alive(int(result["pid"]))
+    return True
+
+
+def _rollback_advisory(
+    _event: dict[str, Any], _diagnosis: dict[str, Any], _result: Any, _deadline: float
+) -> bool:
+    return True
+
+
+def _match_idle_safe_runner(event: dict[str, Any], diagnosis: dict[str, Any]) -> bool:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    text = " ".join(
+        [
+            str(event.get("summary") or ""),
+            str(payload.get("process") or ""),
+            str(payload.get("command") or ""),
+        ]
+    ).lower()
+    remedies = " ".join(str(x) for x in diagnosis.get("remedies", [])).lower()
+    is_runner = any(tok in text for tok in ("pytest", "swiftc", "xcodebuild"))
+    asks_cleanup = any(tok in remedies for tok in ("terminate", "stop", "quit", "orphan", "idle"))
+    return is_runner and asks_cleanup
+
+
+def _execute_idle_safe_runner(
+    event: dict[str, Any], _diagnosis: dict[str, Any], deadline: float
+) -> dict[str, Any]:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    pid = int(_float(payload.get("pid"), 0))
+    return _terminate_verified_pid(pid, ("pytest", "swiftc", "xcodebuild"), deadline)
+
+
+_PRUNE_AUTOMATION_BROWSER_ACTION = RemediationAction(
+    action_id="prune-automation-browser-tabs",
+    matches=_match_automation_browser,
+    execute=_execute_automation_browser,
+    verify=_verify_pid_stopped,
+    rollback=_rollback_advisory,
+    timeout_seconds=10.0,
+)
+_TERMINATE_IDLE_SAFE_RUNNER_ACTION = RemediationAction(
+    action_id="terminate-idle-safe-runner",
+    matches=_match_idle_safe_runner,
+    execute=_execute_idle_safe_runner,
+    verify=_verify_pid_stopped,
+    rollback=_rollback_advisory,
+    timeout_seconds=10.0,
+)
+
 # Add an action only after its matcher, execution, verification, and rollback
-# behavior have been reviewed. Resource incidents have no safe built-in fixer.
-DEFAULT_REMEDIATION_ACTIONS: tuple[RemediationAction, ...] = ()
+# behavior have been reviewed.
+DEFAULT_REMEDIATION_ACTIONS: tuple[RemediationAction, ...] = (
+    _PRUNE_AUTOMATION_BROWSER_ACTION,
+    _TERMINATE_IDLE_SAFE_RUNNER_ACTION,
+)
+
+
+def _resolve_openai_api_key() -> str:
+    direct = os.environ.get("OPENAI_API_KEY", "").strip()
+    if direct:
+        return direct
+    for candidate in (
+        Path(os.path.expanduser("~/.config/idle-maintenance/openai.env")),
+        Path(os.path.expanduser("~/.env")),
+    ):
+        if not candidate.is_file():
+            continue
+        try:
+            for raw_line in candidate.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if line.startswith("OPENAI_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip("\"'")
+                    if val:
+                        return val
+        except OSError:
+            continue
+    try:
+        completed = subprocess.run(
+            ["launchctl", "getenv", "OPENAI_API_KEY"],
+            text=True,
+            capture_output=True,
+            timeout=1.5,
+            check=False,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            return completed.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 DIAGNOSIS_SCHEMA = {
@@ -983,7 +1140,7 @@ class OpenAIAPI:
         api_key: str | None = None,
         opener: Callable[..., Any] = urllib.request.urlopen,
     ) -> None:
-        self.api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")
+        self.api_key = api_key if api_key is not None else _resolve_openai_api_key()
         self.opener = opener
         self.timeout = max(5.0, float(setting(config, "activity_intelligence_llm_timeout_seconds")))
         self.embedding_model = str(setting(config, "activity_intelligence_embedding_model"))
@@ -1066,11 +1223,73 @@ class ResilientEmbeddingProvider:
         self.last_error = ""
 
     def __call__(self, text: str) -> Sequence[float]:
+        if not self.api.api_key:
+            return embed_text(text, DIM)
         try:
             return self.api.embed(text)
         except Exception as error:
             self.last_error = str(error)[:500]
             return embed_text(text, DIM)
+
+
+class HeuristicDiagnoser:
+    """Offline rule-based diagnoser used when no OpenAI API key is configured."""
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config or {}
+
+    def diagnose(self, prompt: str) -> DiagnosisResult:
+        lower = prompt.lower()
+        if any(tok in lower for tok in ("--headless", "playwright", "puppeteer", "chromedriver")):
+            diagnosis = {
+                "summary": "Headless browser automation processes generated sustained resource activity.",
+                "likely_causes": ["Leftover or looping headless browser automation workers"],
+                "remedies": ["Terminate idle headless automation worker processes and verify cleanup"],
+                "evidence": ["Process metadata matches headless automation runtime"],
+                "verification": "Confirm disk I/O and CPU drop back below maintenance thresholds.",
+                "confidence": 0.85,
+                "urgency": "medium",
+                "uncertainty": "Local heuristic diagnosis without remote LLM context.",
+            }
+        elif any(tok in lower for tok in ("fileproviderd", "bird", "cloudd", "cloud-sync")):
+            diagnosis = {
+                "summary": "Repeated cloud file provider synchronization I/O burst.",
+                "likely_causes": ["Ongoing iCloud/File Provider sync backlog or large workspace churn"],
+                "remedies": ["Inspect pending cloud sync transfers and exclude build/cache folders"],
+                "evidence": ["Cloud sync daemon repeated high-throughput intervals"],
+                "verification": "Monitor disk throughput over the next 2 windows after sync settles.",
+                "confidence": 0.78,
+                "urgency": "low",
+                "uncertainty": "Local heuristic diagnosis; per-process counters reflect I/O charged to process.",
+            }
+        elif any(tok in lower for tok in ("mds", "spotlight", "mdworker", "corespotlightd")):
+            diagnosis = {
+                "summary": "Repeated Spotlight indexing activity burst.",
+                "likely_causes": ["Heavy filesystem writes in unexcluded build or repository directories"],
+                "remedies": ["Add volatile build/venv directories to Spotlight privacy exclusions"],
+                "evidence": ["Spotlight worker processes appeared in repeated high-I/O incidents"],
+                "verification": "Verify Spotlight worker I/O subsides without forcing daemon termination.",
+                "confidence": 0.8,
+                "urgency": "low",
+                "uncertainty": "Local heuristic diagnosis without Spotlight queue introspection.",
+            }
+        else:
+            diagnosis = {
+                "summary": "Sustained local resource spike pattern detected.",
+                "likely_causes": ["Repeated high CPU, memory, or disk throughput across observation windows"],
+                "remedies": ["Review active foreground/background workloads and quit unneeded helpers gracefully"],
+                "evidence": ["Clustered high-resource incident events exceeded local policy thresholds"],
+                "verification": "Confirm aggregate disk rate and process resource use return to baseline.",
+                "confidence": 0.72,
+                "urgency": "medium",
+                "uncertainty": "Local heuristic diagnosis used because OPENAI_API_KEY is not configured.",
+            }
+        return DiagnosisResult(
+            True,
+            text=render_diagnosis(diagnosis),
+            model="local-heuristic",
+            diagnosis=diagnosis,
+        )
 
 
 def render_diagnosis(diagnosis: dict[str, Any]) -> str:
@@ -1246,10 +1465,10 @@ def novel_incident_is_severe(event: dict[str, Any], config: dict[str, Any]) -> b
     if not math.isfinite(multiplier):
         multiplier = 4.0
     multiplier = max(1.0, multiplier)
-    total_base = _float(config.get("process_high_io_total_mib_per_second"), 20.0)
-    write_base = _float(config.get("process_high_io_write_mib_per_second"), 10.0)
-    total_threshold = max(0.0, total_base if math.isfinite(total_base) else 20.0) * multiplier
-    write_threshold = max(0.0, write_base if math.isfinite(write_base) else 10.0) * multiplier
+    total_base = _float(config.get("process_high_io_total_mib_per_second"), 30.0)
+    write_base = _float(config.get("process_high_io_write_mib_per_second"), 15.0)
+    total_threshold = max(0.0, total_base if math.isfinite(total_base) else 30.0) * multiplier
+    write_threshold = max(0.0, write_base if math.isfinite(write_base) else 15.0) * multiplier
     return (
         _float(payload.get("peak_total_mib_s")) >= total_threshold
         or _float(payload.get("peak_write_mib_s")) >= write_threshold
@@ -1364,7 +1583,8 @@ def run_cycle(config: dict[str, Any] | None = None, *, db_path: Path = DB_PATH,
     api = OpenAIAPI(cfg)
     provider = ResilientEmbeddingProvider(api)
     embedder = embedding_fn or (embed_text if diagnoser is not None else provider)
-    engine, diagnoses, added, errors = diagnoser or api, 0, 0, []
+    default_engine = api if api.api_key else HeuristicDiagnoser(cfg)
+    engine, diagnoses, added, errors = diagnoser or default_engine, 0, 0, []
     remediations = 0
     actions = tuple(
         DEFAULT_REMEDIATION_ACTIONS if remediation_actions is None else remediation_actions

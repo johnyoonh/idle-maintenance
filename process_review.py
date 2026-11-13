@@ -355,8 +355,10 @@ def _known_context(proc: dict[str, Any]) -> list[str]:
 
 def prompt_process(core: Any, proc: dict[str, Any], snooze_hours: float = 24, keep_days: float = 1) -> str:
     cpu = ", ".join(f"{x:.1f}%" for x in proc.get("cpu_samples", [proc.get("cpu", 0)]))
+    mem_mib = float(proc.get("memory_mib") or 0.0)
+    mem_suffix = f" • Mem {mem_mib:.0f} MiB" if mem_mib > 0 else ""
     detail = (
-        f"PID {proc['pid']} • CPU samples: {cpu} • Elapsed {proc.get('etime', '?')}\n"
+        f"PID {proc['pid']} • CPU samples: {cpu}{mem_suffix} • Elapsed {proc.get('etime', '?')}\n"
         f"Reason: {proc.get('reason', 'Matched resource policy')}"
     )
     rates = proc.get("io_samples", [])

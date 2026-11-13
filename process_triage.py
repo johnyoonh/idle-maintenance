@@ -54,10 +54,39 @@ def triage_process(
     peak_total_mib_s: float | None = None,
     peak_write_mib_s: float | None = None,
     recurrence: bool = False,
+    window_count: int | None = None,
 ) -> dict[str, Any]:
-    """Return suppress/review without authorizing any corrective action."""
+    """Return suppress/review/log-only without authorizing any corrective action."""
     cfg = config or {}
+    measured_windows = (
+        int(window_count)
+        if window_count is not None
+        else int(proc.get("window_count", 0) or 0)
+    )
+    if measured_windows <= 0:
+        samples = proc.get("io_samples") or proc.get("cpu_samples") or []
+        measured_windows = len(samples) if isinstance(samples, list) and samples else 2
+
     if guidance is None:
+        min_windows = max(1, int(cfg.get("resource_monitor_min_consecutive_windows", 2)))
+        total_base = _bounded_number(cfg.get("process_high_io_total_mib_per_second", 30.0), 30.0)
+        write_base = _bounded_number(cfg.get("process_high_io_write_mib_per_second", 15.0), 15.0)
+        cpu_base = _bounded_number(cfg.get("process_high_cpu_threshold", 75.0), 75.0)
+        measured_total = max(_peak_io(proc, "total_mib_s", "average_total_mib_s"), _finite_float(peak_total_mib_s) or 0.0)
+        measured_write = max(_peak_io(proc, "write_mib_s", "average_write_mib_s"), _finite_float(peak_write_mib_s) or 0.0)
+        peak_cpu = _peak_cpu(proc)
+        extreme_spike = (
+            (total_base and measured_total >= total_base * 2.0)
+            or (write_base and measured_write >= write_base * 2.0)
+            or (cpu_base and peak_cpu >= cpu_base * 2.0)
+        )
+        if not recurrence and measured_windows < min_windows and not extreme_spike:
+            return {
+                "decision": "log-only",
+                "classification": "unconfirmed",
+                "reason": "Single sampling window spike; waiting for sustained confirmation before prompting.",
+                "guidance": None,
+            }
         return {
             "decision": "review",
             "classification": "unknown",
@@ -95,19 +124,24 @@ def triage_process(
         minimum=1.0,
     )
     cpu_limit = _bounded_number(
-        cfg.get("process_high_cpu_threshold", 50.0),
-        50.0,
+        cfg.get("process_high_cpu_threshold", 75.0),
+        75.0,
     ) * cpu_multiplier
+    mem_limit = _bounded_number(
+        cfg.get("process_high_memory_mib", 3072.0),
+        3072.0,
+    ) * multiplier
     total_limit = _bounded_number(
-        cfg.get("process_high_io_total_mib_per_second", 20.0),
-        20.0,
+        cfg.get("process_high_io_total_mib_per_second", 30.0),
+        30.0,
     ) * io_multiplier
     write_limit = _bounded_number(
-        cfg.get("process_high_io_write_mib_per_second", 10.0),
-        10.0,
+        cfg.get("process_high_io_write_mib_per_second", 15.0),
+        15.0,
     ) * io_multiplier
 
     peak_cpu = _peak_cpu(proc)
+    peak_mem = _finite_float(proc.get("memory_mib")) or 0.0
     measured_total = _peak_io(proc, "total_mib_s", "average_total_mib_s")
     measured_write = _peak_io(proc, "write_mib_s", "average_write_mib_s")
     provided_total = _finite_float(peak_total_mib_s)
@@ -120,6 +154,8 @@ def triage_process(
     exceeded = []
     if cpu_limit and peak_cpu >= cpu_limit:
         exceeded.append(f"CPU {peak_cpu:.1f}% >= {cpu_limit:.1f}%")
+    if mem_limit and peak_mem >= mem_limit:
+        exceeded.append(f"Memory {peak_mem:.0f} MiB >= {mem_limit:.0f} MiB")
     if total_limit and measured_total >= total_limit:
         exceeded.append(f"I/O {measured_total:.1f} MiB/s >= {total_limit:.1f} MiB/s")
     if write_limit and measured_write >= write_limit:

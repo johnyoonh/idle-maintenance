@@ -7,7 +7,9 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import signal
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -159,6 +161,37 @@ def _known_process_guidance(proc: dict[str, Any]) -> dict[str, Any] | None:
     from process_review import known_process_guidance
 
     return known_process_guidance(proc)
+
+
+def _frontmost_app_name() -> str:
+    try:
+        completed = subprocess.run(
+            ["lsappinfo", "front"],
+            text=True,
+            capture_output=True,
+            timeout=1.5,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if completed.returncode != 0 or not completed.stdout:
+        return ""
+    match = re.search(r'\"([^\"]+)\"', completed.stdout)
+    if match:
+        return match.group(1)
+    try:
+        asn = completed.stdout.strip()
+        info = subprocess.run(
+            ["lsappinfo", "info", "-only", "name", asn],
+            text=True,
+            capture_output=True,
+            timeout=1.5,
+            check=False,
+        )
+        name_match = re.search(r'\"LSDisplayName\"=\"([^\"]+)\"', info.stdout)
+        return name_match.group(1) if name_match else ""
+    except Exception:
+        return ""
 
 
 class ResourceMonitor:
@@ -404,9 +437,19 @@ class ResourceMonitor:
             self._history_dirty = False
 
     def _qualified(self, interval: dict[str, Any]) -> bool:
-        total_limit = float(self.config.get("process_high_io_total_mib_per_second", 20))
-        write_limit = float(self.config.get("process_high_io_write_mib_per_second", 10))
+        total_limit = float(self.config.get("process_high_io_total_mib_per_second", 30))
+        write_limit = float(self.config.get("process_high_io_write_mib_per_second", 15))
         return interval["total_mib_s"] >= total_limit or interval["write_mib_s"] >= write_limit
+
+    def _is_focus_suppressed(self) -> bool:
+        raw = self.config.get("resource_monitor_suppress_fullscreen_or_call_apps")
+        if not raw:
+            return False
+        targets = [str(item).strip().lower() for item in raw if str(item).strip()]
+        if not targets:
+            return False
+        front = _frontmost_app_name().strip().lower()
+        return bool(front and any(target in front for target in targets))
 
     def _open_incident(
         self,
@@ -450,6 +493,7 @@ class ResourceMonitor:
             peak_total_mib_s=peak_total,
             peak_write_mib_s=peak_write,
             recurrence=recurrence,
+            window_count=len(window),
         )
         if process_keep_is_active(
             self.config,
@@ -465,7 +509,7 @@ class ResourceMonitor:
                     "reason": "Process Leave window is still active.",
                 }
             )
-        suppressed = resource_triage["decision"] == "suppress"
+        suppressed = resource_triage["decision"] in {"suppress", "log-only"}
         incident_id = f"{int(now)}-{instance[:12]}"
         command = str(proc.get("command") or proc.get("comm") or "process")
         incident = {
@@ -631,7 +675,7 @@ class ResourceMonitor:
             float(self.config.get("review_prompt_idle_seconds", 300)),
         )
         prompt_idle_max_seconds = float(
-            self.config.get("review_prompt_idle_max_seconds", 0)
+            self.config.get("review_prompt_idle_max_seconds", 1800)
         )
         return_threshold = max(
             0.0,
@@ -647,6 +691,7 @@ class ResourceMonitor:
             and idle_window_contains(
                 idle_seconds, prompt_idle_seconds, prompt_idle_max_seconds
             )
+            and not self._is_focus_suppressed()
         ):
             for incident_id in list(self.state["pending_prompts"]):
                 incident = self._incident_by_id(incident_id)
@@ -726,7 +771,7 @@ class ResourceMonitor:
         elapsed = self.interval_seconds if seconds is None else float(seconds)
         available = bool(system_status.get("available"))
         system_rate = float(system_status.get("mib_per_second") or 0)
-        system_gate = float(self.config.get("system_disk_busy_mib_per_second", 50))
+        system_gate = float(self.config.get("system_disk_busy_mib_per_second", 75))
         aggregate_hot = available and system_rate >= system_gate
         hot_instances: set[str] = set()
         tracked_instances: set[str] = set()
@@ -772,11 +817,13 @@ class ResourceMonitor:
 
             if window is not None:
                 required = max(1, int(self.config.get("process_io_required_intervals", 2)))
-                minimum = float(self.config.get("process_io_minimum_window_mib", 256)) * MIB
+                min_consecutive = max(1, int(self.config.get("resource_monitor_min_consecutive_windows", 2)))
+                needed_windows = max(2, min_consecutive)
+                minimum = float(self.config.get("process_io_minimum_window_mib", 384)) * MIB
                 qualifying = sum(bool(item.get("qualified")) for item in window)
                 total_bytes = sum(int(item.get("total_bytes", 0)) for item in window)
                 if (
-                    len(window) >= 2
+                    len(window) >= needed_windows
                     and qualifying >= required
                     and total_bytes >= minimum
                 ):
@@ -850,7 +897,7 @@ class ResourceMonitor:
             ),
             "prompt_idle_max_seconds": max(
                 0.0,
-                float(self.config.get("review_prompt_idle_max_seconds", 0)),
+                float(self.config.get("review_prompt_idle_max_seconds", 1800)),
             ),
             "return_routing_enabled": bool(self.config.get("return_routing_enabled", True)),
             "return_active_cutoff_seconds": max(
@@ -936,7 +983,7 @@ def run_monitor(
             available = bool(status.get("available"))
             system_rate = float(status.get("mib_per_second") or 0)
             aggregate_hot = available and system_rate >= float(
-                cfg.get("system_disk_busy_mib_per_second", 50)
+                cfg.get("system_disk_busy_mib_per_second", 75)
             )
             current = provider() if aggregate_hot else {}
 

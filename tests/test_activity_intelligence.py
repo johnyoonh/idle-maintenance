@@ -8,10 +8,13 @@ import datetime as dt
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from activity_intelligence import (
     ActivityWatchContext,
+    DEFAULT_REMEDIATION_ACTIONS,
     DiagnosisResult,
+    HeuristicDiagnoser,
     INVESTIGATION_SUMMARY_PREFIX,
     OpenAIAPI,
     RemediationAction,
@@ -267,7 +270,7 @@ class ActivityIntelligenceTests(unittest.TestCase):
                 return DiagnosisResult(True, "A novel high I/O event.", diagnosis=diagnosis)
 
         diagnoser = SuggestedDiagnoser()
-        severe = self.incident(1, peak=100)
+        severe = self.incident(1, peak=130)
         severe["recurrence"] = False
         self.write_state([severe])
 
@@ -316,7 +319,7 @@ class ActivityIntelligenceTests(unittest.TestCase):
             verify=lambda _event, _diagnosis, result, _deadline: result == {"changed": True},
             rollback=lambda _event, _diagnosis, _result, _deadline: calls.append("rollback") or True,
         )
-        severe = self.incident(1, peak=100)
+        severe = self.incident(1, peak=130)
         severe["recurrence"] = False
         self.write_state([severe])
 
@@ -350,7 +353,7 @@ class ActivityIntelligenceTests(unittest.TestCase):
             verify=lambda *_args: False,
             rollback=lambda *_args: calls.append("rollback") or True,
         )
-        severe = self.incident(1, peak=100)
+        severe = self.incident(1, peak=130)
         severe["recurrence"] = False
         self.write_state([severe])
 
@@ -866,6 +869,42 @@ class ActivityIntelligenceTests(unittest.TestCase):
                 self.assertEqual(len(json.loads(row[0])), 512)
             columns = {value[1] for value in store.connection.execute("PRAGMA table_info(diagnoses)")}
             self.assertIn("diagnosis_json", columns)
+
+    def test_heuristic_diagnoser_fallback_and_builtin_remediations(self):
+        action_ids = {action.action_id for action in DEFAULT_REMEDIATION_ACTIONS}
+        self.assertIn("prune-automation-browser-tabs", action_ids)
+        self.assertIn("terminate-idle-safe-runner", action_ids)
+
+        diagnoser = HeuristicDiagnoser(self.config)
+        result = diagnoser.diagnose("cluster fileproviderd high I/O cloud-sync incident")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.model, "local-heuristic")
+        self.assertIsInstance(result.diagnosis, dict)
+        self.assertIn("summary", result.diagnosis)
+        self.assertIn("remedies", result.diagnosis)
+
+        severe = self.incident(1, peak=130)
+        severe["recurrence"] = False
+        self.write_state([severe])
+        old_key = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            with patch("activity_intelligence._resolve_openai_api_key", return_value=""):
+                cycle = run_cycle(
+                    self.config,
+                    db_path=self.db,
+                    resource_state_path=self.state,
+                    app_usage_path=self.usage,
+                    report_path=self.report,
+                    embedding_fn=embed_text,
+                    notify_fn=lambda *_args: None,
+                    now_fn=lambda: self.clock,
+                )
+        finally:
+            if old_key is not None:
+                os.environ["OPENAI_API_KEY"] = old_key
+        self.assertEqual(cycle["diagnoses"], 1)
+        self.assertEqual(cycle["errors"], [])
+        self.assertEqual(status(self.db)["latest"]["model"], "local-heuristic")
 
 
 if __name__ == "__main__":

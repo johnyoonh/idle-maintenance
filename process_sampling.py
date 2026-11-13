@@ -34,28 +34,41 @@ def get_candidate_processes(config, snapshot_provider=None, sleep_fn=time.sleep)
         samples.append((when, provider()))
         previous = when
     first = samples[0][1]
-    cpu_limit = float(config.get("process_high_cpu_threshold", 50))
+    cpu_limit = float(config.get("process_high_cpu_threshold", 75.0))
     long_seconds = int(config.get("process_long_running_hours", 24)) * 3600
-    long_cpu = float(config.get("process_long_running_min_cpu", 10))
-    total_limit = float(config.get("process_high_io_total_mib_per_second", 20))
-    write_limit = float(config.get("process_high_io_write_mib_per_second", 10))
-    min_bytes = float(config.get("process_io_minimum_window_mib", 256)) * MIB
+    long_cpu = float(config.get("process_long_running_min_cpu", 15.0))
+    high_memory_mib = float(config.get("process_high_memory_mib", 3072.0))
+    total_limit = float(config.get("process_high_io_total_mib_per_second", 30.0))
+    write_limit = float(config.get("process_high_io_write_mib_per_second", 15.0))
+    min_bytes = float(config.get("process_io_minimum_window_mib", 384.0)) * MIB
     required = max(1, int(config.get("process_io_required_intervals", 2)))
     found = []
     for pid, initial in first.items():
         reasons = []
         proc = dict(initial)
         cpu_values = []
+        memory_values = []
         for when in cpu_times:
             current = _at(samples, when).get(pid)
             if not same(initial, current):
                 cpu_values = []
+                memory_values = []
                 break
             cpu_values.append(float(current.get("cpu", 0)))
+            mem_val = float(current.get("memory_mib", 0.0) or (float(current.get("memory_bytes", 0) or 0) / MIB))
+            memory_values.append(mem_val)
             proc.update(current)
         if len(cpu_values) == cpu_count and all(value >= cpu_limit for value in cpu_values):
             reasons.append(
                 f"CPU stayed at or above {cpu_limit:.1f}% for {cpu_count} samples over {cpu_times[-1]:.0f}s"
+            )
+        if (
+            high_memory_mib > 0
+            and len(memory_values) == cpu_count
+            and all(value >= high_memory_mib for value in memory_values)
+        ):
+            reasons.append(
+                f"high Memory ({max(memory_values):.0f} MiB, limit {high_memory_mib:.0f} MiB)"
             )
         if (
             initial.get("elapsed_seconds", 0) >= long_seconds
@@ -112,9 +125,13 @@ def get_candidate_processes(config, snapshot_provider=None, sleep_fn=time.sleep)
             proc.setdefault("process_key", __import__("process_identity").key(proc))
             proc["cpu_samples"] = cpu_values or [proc.get("cpu", 0)]
             proc["io_samples"] = io_rates
+            if memory_values:
+                proc["memory_samples"] = memory_values
+                proc["memory_mib"] = max(memory_values)
             proc["reason"] = " • ".join(reasons)
+            mem_score = (max(memory_values) / high_memory_mib * 50.0) if (high_memory_mib > 0 and memory_values) else 0.0
             proc["impact_score"] = max(
-                [proc.get("cpu", 0)] + [item["total_mib_s"] * 4 for item in io_rates]
+                [proc.get("cpu", 0), mem_score] + [item["total_mib_s"] * 4 for item in io_rates]
             )
             found.append(proc)
     return sorted(found, key=lambda proc: (-proc["impact_score"], -proc.get("elapsed_seconds", 0)))

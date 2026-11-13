@@ -80,7 +80,14 @@ def io_counters(pid):
         libproc = _get_libproc()
         info = RUsageInfoV2()
         if libproc.proc_pid_rusage(int(pid), 2, ctypes.byref(info)): return None
-        return {"io_read_bytes": int(info.read), "io_write_bytes": int(info.written), "start_abstime": int(info.start)}
+        memory_bytes = int(info.phys or info.resident)
+        return {
+            "io_read_bytes": int(info.read),
+            "io_write_bytes": int(info.written),
+            "start_abstime": int(info.start),
+            "memory_bytes": memory_bytes,
+            "memory_mib": round(memory_bytes / 1048576.0, 1),
+        }
     except (OSError, AttributeError, TypeError, ValueError):
         return None
 
@@ -155,7 +162,10 @@ def snapshot(config, counter_provider=io_counters, output=None):
         if proc["comm"] in ignored or base in ignored or base in internal: continue
         if config.get("process_io_enabled", True):
             counters = counter_provider(proc["pid"])
-            if counters: proc.update(counters)
+            if counters:
+                proc.update(counters)
+                if "memory_bytes" in proc and "memory_mib" not in proc:
+                    proc["memory_mib"] = round(float(proc["memory_bytes"]) / 1048576.0, 1)
         result[proc["pid"]] = proc
     return result
 
@@ -171,5 +181,8 @@ def read(pid):
     except (OSError, subprocess.CalledProcessError): return None
     proc = parse_line(lines[0]) if lines else None
     counters = io_counters(pid) if proc else None
-    if counters: proc.update(counters)
+    if counters:
+        proc.update(counters)
+        if "memory_bytes" in proc and "memory_mib" not in proc:
+            proc["memory_mib"] = round(float(proc["memory_bytes"]) / 1048576.0, 1)
     return proc

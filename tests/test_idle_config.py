@@ -58,13 +58,16 @@ class IdleConfigTests(unittest.TestCase):
         self.assertIn("--refresh", command)
         self.assertIn("--json", command)
 
-    def test_automatic_review_waits_five_minutes_without_an_idle_cap(self):
+    def test_automatic_review_waits_five_minutes_within_bounded_idle_window(self):
         minimum = DEFAULT_CONFIG["review_prompt_idle_seconds"]
         maximum = DEFAULT_CONFIG["review_prompt_idle_max_seconds"]
 
+        self.assertEqual(maximum, 1800)
         self.assertFalse(idle_window_contains(299, minimum, maximum))
         self.assertTrue(idle_window_contains(300, minimum, maximum))
-        self.assertTrue(idle_window_contains(86_400, minimum, maximum))
+        self.assertTrue(idle_window_contains(1799, minimum, maximum))
+        self.assertFalse(idle_window_contains(1800, minimum, maximum))
+        self.assertFalse(idle_window_contains(86_400, minimum, maximum))
         self.assertEqual(DEFAULT_CONFIG["shortcut_popup_timeout_seconds"], 600)
 
 

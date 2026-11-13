@@ -4,6 +4,8 @@ import plistlib
 import re
 import subprocess
 
+_SOURCE_CACHE = {}
+
 KNOWN_CASK_APP_NAMES = {
     "activitywatch": "ActivityWatch",
     "alt-tab": "AltTab",
@@ -30,6 +32,15 @@ def load_brewfile_sources(path):
     if not os.path.exists(path):
         return casks, mas_apps
 
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        mtime = None
+    cache_key = ("brewfile", path)
+    cached = _SOURCE_CACHE.get(cache_key)
+    if mtime is not None and cached and cached[0] == mtime:
+        return cached[1]
+
     with open(path, "r") as f:
         for line in f:
             cask_match = re.match(r'^\s*cask\s+"([^"]+)"', line)
@@ -53,13 +64,25 @@ def load_brewfile_sources(path):
                     "restore_command": f"mas install {app_id}",
                 }
 
-    return casks, mas_apps
+    result = (casks, mas_apps)
+    if mtime is not None:
+        _SOURCE_CACHE[cache_key] = (mtime, result)
+    return result
 
 def load_mas_inventory(path):
     path = os.path.expanduser(path)
     mas_apps = {}
     if not os.path.exists(path):
         return mas_apps
+
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        mtime = None
+    cache_key = ("mas_tsv", path)
+    cached = _SOURCE_CACHE.get(cache_key)
+    if mtime is not None and cached and cached[0] == mtime:
+        return cached[1]
 
     with open(path, "r") as f:
         for line in f:
@@ -76,6 +99,8 @@ def load_mas_inventory(path):
                 "name": name,
                 "restore_command": f"mas install {app_id}",
             }
+    if mtime is not None:
+        _SOURCE_CACHE[cache_key] = (mtime, mas_apps)
     return mas_apps
 
 def classify_app_restore_source(app_path, providers=None):
@@ -127,6 +152,7 @@ def app_metadata(app_path):
             ["mdls", "-raw", "-name", "kMDItemCFBundleIdentifier", app_path],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=2,
         ).strip()
         if bundle_id != "(null)":
             metadata["bundle_id"] = bundle_id

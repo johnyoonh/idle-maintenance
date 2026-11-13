@@ -151,7 +151,7 @@ def watch(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--threshold", type=float, default=20, help="trigger threshold in ps CPU percent (default: 20)")
+    parser.add_argument("--threshold", type=float, default=30, help="trigger threshold in ps CPU percent (default: 30)")
     parser.add_argument("--interval", type=float, default=5, help="seconds between lightweight checks (default: 5)")
     parser.add_argument("--confirmations", type=int, default=2, help="consecutive high readings before sampling (default: 2)")
     parser.add_argument("--sample-seconds", type=float, default=3, help="sample duration (default: 3)")

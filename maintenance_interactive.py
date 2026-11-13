@@ -226,6 +226,40 @@ def _run_app_review() -> bool:
         processed = 0
         current_queue = [dict(item) for item in queue]
 
+        def _build_detail(queue_item):
+            app_path = str(queue_item["path"])
+            detail_text = _core.app_usage_detail(
+                stale_dates.get(app_path, "Unknown"), stale_days_limit
+            )
+            restore_source = _core.get_restore_source(config, app_path)
+            cleanup, _ = _core.app_cleanup_config(config)
+            allow_unknown_restore = bool(cleanup.get("allow_unknown_restore_source", False))
+            if restore_source.get("source") == "unknown" and not allow_unknown_restore:
+                detail_text += " • Restore: unknown; delete disabled"
+            elif restore_source.get("source") == "unknown":
+                detail_text += " • Restore: unknown"
+            else:
+                detail_text += f" • Restore: {restore_source.get('restore_command', restore_source.get('source'))}"
+            leftover_detail = _leftover_review_detail(app_path, config)
+            if leftover_detail:
+                detail_text += "\n" + leftover_detail
+            if queue_item.get("last_prompted", 0) > 0:
+                detail_text += (
+                    " (Last prompted/tried: "
+                    + time.strftime("%Y-%m-%d", time.localtime(queue_item["last_prompted"]))
+                    + ")"
+                )
+            return detail_text
+
+        prepared_details = {}
+        for item in queue:
+            if len(prepared_details) >= max_prompts:
+                break
+            if _core.queue_item_is_snoozed(item, app_snooze_hours):
+                continue
+            path_key = str(item["path"])
+            prepared_details[path_key] = _build_detail(item)
+
         for item in queue:
             if processed >= max_prompts:
                 break
@@ -235,27 +269,7 @@ def _run_app_review() -> bool:
             app_done = False
             while not app_done and processed < max_prompts:
                 app_path = str(item["path"])
-                last_used_info = _core.app_usage_detail(
-                    stale_dates.get(app_path, "Unknown"), stale_days_limit
-                )
-                restore_source = _core.get_restore_source(config, app_path)
-                cleanup, _ = _core.app_cleanup_config(config)
-                allow_unknown_restore = bool(cleanup.get("allow_unknown_restore_source", False))
-                if restore_source.get("source") == "unknown" and not allow_unknown_restore:
-                    last_used_info += " • Restore: unknown; delete disabled"
-                elif restore_source.get("source") == "unknown":
-                    last_used_info += " • Restore: unknown"
-                else:
-                    last_used_info += f" • Restore: {restore_source.get('restore_command', restore_source.get('source'))}"
-                leftover_detail = _leftover_review_detail(app_path, config)
-                if leftover_detail:
-                    last_used_info += "\n" + leftover_detail
-                if item.get("last_prompted", 0) > 0:
-                    last_used_info += (
-                        " (Last prompted/tried: "
-                        + time.strftime("%Y-%m-%d", time.localtime(item["last_prompted"]))
-                        + ")"
-                    )
+                last_used_info = prepared_details.get(app_path) or _build_detail(item)
                 keep_days = next_keep_delay_days(config, whitelist.get(app_path))
                 app_name = os.path.basename(app_path)
                 with _core.track_slowdown("maintenance_interactive", f"prompt_user:{app_name}", threshold=15.0) as ctx:
