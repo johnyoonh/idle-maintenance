@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+import plistlib
 import subprocess
 import os
 import time
@@ -28,6 +29,112 @@ WHITELIST = [
     "Pages.app", "Keynote.app", "iMovie.app", "GarageBand.app",
     "App Store.app", "System Settings.app", "iTerm.app"
 ]
+DEFAULT_EXCLUDED_APP_DIRS = ("~/Applications/Local Automation",)
+DEFAULT_APP_MIN_AGE_DAYS = 14
+
+
+def _extract_app_bundle_path(raw_value):
+    if not isinstance(raw_value, str) or ".app" not in raw_value:
+        return None
+    marker = ".app"
+    idx = raw_value.find(marker)
+    candidate = raw_value[: idx + len(marker)]
+    if candidate.endswith(".app"):
+        return os.path.normcase(normalize_app_path(os.path.expanduser(candidate)))
+    return None
+
+
+def launchagent_referenced_app_paths(launch_agents_dirs=None):
+    """Return normalized .app bundle paths referenced by active LaunchAgent plists."""
+    dirs = launch_agents_dirs or (os.path.expanduser("~/Library/LaunchAgents"),)
+    referenced = set()
+    for directory in dirs:
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                if not entry.name.endswith(".plist"):
+                    continue
+                try:
+                    with open(entry.path, "rb") as handle:
+                        plist = plistlib.load(handle)
+                except Exception:
+                    continue
+                if not isinstance(plist, dict):
+                    continue
+                values = []
+                if isinstance(plist.get("Program"), str):
+                    values.append(plist["Program"])
+                if isinstance(plist.get("ProgramArguments"), list):
+                    values.extend(arg for arg in plist["ProgramArguments"] if isinstance(arg, str))
+                for val in values:
+                    bundle = _extract_app_bundle_path(val)
+                    if bundle:
+                        referenced.add(bundle)
+    return referenced
+
+
+def is_background_only_bundle(app_path):
+    info_plist = os.path.join(app_path, "Contents", "Info.plist")
+    if not os.path.exists(info_plist):
+        return False
+    try:
+        with open(info_plist, "rb") as handle:
+            info = plistlib.load(handle)
+    except Exception:
+        return False
+    if not isinstance(info, dict):
+        return False
+    return bool(info.get("LSBackgroundOnly"))
+
+
+def bundle_age_days(app_path, now_ts=None):
+    try:
+        st = os.stat(app_path)
+    except OSError:
+        return None
+    created_or_mod = getattr(st, "st_birthtime", None)
+    if created_or_mod is None or created_or_mod <= 0:
+        created_or_mod = st.st_mtime
+    now_value = time.time() if now_ts is None else now_ts
+    return max(0.0, (now_value - float(created_or_mod)) / 86400.0)
+
+
+def is_excluded_app(app_path, config, launchagent_apps, now_ts=None):
+    norm_app = os.path.normcase(normalize_app_path(app_path))
+    app_name = os.path.basename(app_path)
+
+    excluded_dirs = config.get("excluded_app_dirs", DEFAULT_EXCLUDED_APP_DIRS)
+    if isinstance(excluded_dirs, (list, tuple)):
+        for raw_dir in excluded_dirs:
+            norm_dir = os.path.normcase(normalize_app_path(os.path.expanduser(str(raw_dir))))
+            if norm_app == norm_dir or norm_app.startswith(norm_dir + os.sep):
+                return True
+
+    ignored_apps = config.get("ignored_apps", [])
+    if isinstance(ignored_apps, (list, tuple)):
+        for ignored in ignored_apps:
+            ignored_str = str(ignored)
+            if app_name == ignored_str:
+                return True
+            if os.path.normcase(normalize_app_path(os.path.expanduser(ignored_str))) == norm_app:
+                return True
+
+    if norm_app in launchagent_apps:
+        return True
+
+    if is_background_only_bundle(app_path):
+        return True
+
+    min_age_days = float(config.get("app_min_age_days", DEFAULT_APP_MIN_AGE_DAYS))
+    if min_age_days > 0:
+        age = bundle_age_days(app_path, now_ts=now_ts)
+        if age is not None and age < min_age_days:
+            return True
+
+    return False
 
 def load_custom_whitelist():
     data = read_json_file(WHITELIST_PATH)
@@ -193,6 +300,7 @@ def get_stale_apps(now_fn=time.monotonic):
     handoff_app_name = handoff_app if handoff_app.endswith(".app") else f"{handoff_app}.app"
     
     custom_whitelist = load_custom_whitelist()
+    launchagent_apps = launchagent_referenced_app_paths()
     app_usage = load_app_usage()
     cache = load_audit_cache()
     remaining = max(0.0, deadline - now_fn())
@@ -207,6 +315,7 @@ def get_stale_apps(now_fn=time.monotonic):
         if ".Trash" in app: continue
         if "localized" in app: continue 
         if "Xcode.app" in app: continue
+        if is_excluded_app(app, config, launchagent_apps): continue
         
         last_used_days, date_str = last_used_by_app.get(app, (None, "Unknown"))
         if last_used_days is None:

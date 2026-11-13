@@ -93,6 +93,54 @@ class MaintenanceInteractiveTests(unittest.TestCase):
 
         self.assertIn("cooling down", output.getvalue())
 
+    def test_finish_shortcut_review_sets_skip_idle_wait_by_default(self):
+        captured = {}
+
+        def fake_review(config, **_kwargs):
+            captured.update(config)
+            return {"ok": True, "skipped": False}
+
+        with (
+            patch.object(maintenance, "load_config", return_value={"show_shortcuts_on_finish": True}),
+            patch.object(maintenance, "run_shortcut_review", side_effect=fake_review),
+        ):
+            maintenance._finish_shortcut_review()
+
+        self.assertTrue(captured.get("shortcut_skip_idle_wait"))
+
+    def test_run_app_review_returns_true_when_no_stale_apps_due(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake_config = {
+                "max_prompts": 3,
+                "app_snooze_hours": 24,
+                "stale_days_limit": 90,
+            }
+
+            class NoOpLock:
+                def __enter__(self):
+                    return True
+
+                def __exit__(self, *_args):
+                    return False
+
+            with (
+                patch.object(maintenance, "_interactive_lock", return_value=NoOpLock()),
+                patch.object(maintenance, "load_config", return_value=fake_config),
+                patch.object(maintenance._app_actions, "launch_worker"),
+                patch.object(
+                    maintenance.subprocess,
+                    "run",
+                    return_value=Mock(returncode=0, stdout=""),
+                ),
+                patch.object(maintenance._core, "run_process_audit", return_value=(True, 0)),
+                patch.object(maintenance._core, "load_json", return_value=[]),
+                patch.object(maintenance._core, "load_custom_whitelist", return_value={}),
+                patch.object(maintenance, "_persist_app_state"),
+                patch.object(maintenance._app_actions, "active_action_paths", return_value=set()),
+            ):
+                self.assertTrue(maintenance._run_app_review())
+
     def test_queue_snooze_uses_configured_window(self):
         item = {"last_prompted": 1_000}
         self.assertTrue(maintenance.queue_item_is_snoozed(item, 24, now=1_000 + 86_399))

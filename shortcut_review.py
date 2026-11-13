@@ -93,6 +93,27 @@ def _last_shown(state: dict[str, Any], provider: str) -> str:
     return str(state.get("providers", {}).get(provider, {}).get("lastShownAt", ""))
 
 
+def _last_failed(state: dict[str, Any], provider: str) -> str:
+    return str(state.get("providers", {}).get(provider, {}).get("lastFailedAt", ""))
+
+
+def _effective_last_activity(state: dict[str, Any], provider: str) -> str:
+    return max(_last_shown(state, provider), _last_failed(state, provider))
+
+
+def _record_failed(
+    path: Path,
+    state: dict[str, Any],
+    provider: str,
+    reason: str,
+    timestamp: datetime,
+) -> None:
+    entry = state.setdefault("providers", {}).setdefault(provider, {})
+    entry["lastFailedAt"] = timestamp.isoformat()
+    entry["lastFailureReason"] = reason
+    _save_state(path, state)
+
+
 def _local_datetime(value: Any) -> datetime | None:
     try:
         parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
@@ -248,12 +269,13 @@ def _run_provider(
                             "warnings": [f"browser shortcut audit failed: {detail}"],
                         }
 
+    minimum_idle = max(
+        max(0.0, float(config.get("return_active_cutoff_seconds", 30))),
+        float(config.get("review_prompt_idle_seconds", 300)),
+    )
+    skip_idle_wait = bool(config.get("shortcut_skip_idle_wait", False))
     for name, command in (("refresh", refresh), ("popup", popup)):
-        if automatic and name == "popup":
-            minimum_idle = max(
-                max(0.0, float(config.get("return_active_cutoff_seconds", 30))),
-                float(config.get("review_prompt_idle_seconds", 300)),
-            )
+        if automatic and name == "popup" and not skip_idle_wait:
             popup_timeout = float(config.get("shortcut_popup_timeout_seconds", 600))
             with track_slowdown("shortcut_review", f"wait_until_idle:{provider}:{name}", threshold=5.0):
                 try:
@@ -302,7 +324,7 @@ def _run_provider(
                             steps.append({"name": "browser-conflict-review", "command": conflict_command,
                                           "returncode": 126, "stdout": "", "stderr": str(error)})
                             browser_audit.setdefault("warnings", []).append("Website conflict review unavailable; keyboard practice remains available.")
-                if automatic:
+                if automatic and not skip_idle_wait:
                     # The user may have resumed work while resolving a card.
                     popup_timeout = float(config.get("shortcut_popup_timeout_seconds", 600))
                     with track_slowdown("shortcut_review", f"wait_until_idle_after_conflict:{provider}:{name}", threshold=5.0):
@@ -319,21 +341,40 @@ def _run_provider(
                             return {"ok": False, "provider": provider, "failed_step": "idle-gate",
                                     "error": str(error), "steps": steps, "browser_audit": browser_audit}
 
-        run_kwargs = {"capture_output": True, "text": True, "check": False}
-        if provider == "keyboard" and name == "popup":
+        run_kwargs: dict[str, Any] = {"capture_output": True, "text": True, "check": False}
+        if name == "refresh":
             run_kwargs["timeout"] = max(
-                0.1, float(config.get("shortcut_popup_timeout_seconds", 10 * 60))
+                0.1, float(config.get("shortcut_refresh_timeout_seconds", 60))
             )
+        elif name == "popup":
+            if provider == "apple":
+                run_kwargs["timeout"] = max(
+                    0.1,
+                    float(
+                        config.get(
+                            "apple_shortcut_popup_timeout_seconds",
+                            config.get("shortcut_popup_timeout_seconds", 120),
+                        )
+                    ),
+                )
+            else:
+                run_kwargs["timeout"] = max(
+                    0.1, float(config.get("shortcut_popup_timeout_seconds", 10 * 60))
+                )
         with track_slowdown("shortcut_review", f"{provider}:{name}", threshold=5.0):
             try:
-                completed = runner(command, **run_kwargs)
+                try:
+                    completed = runner(command, **run_kwargs)
+                except TypeError:
+                    run_kwargs.pop("timeout", None)
+                    completed = runner(command, **run_kwargs)
             except subprocess.TimeoutExpired as error:
                 timed_out = provider == "keyboard" and name == "popup"
                 timeout = float(run_kwargs.get("timeout", error.timeout or 0))
                 detail = (
                     f"Keyboard shortcut popup timed out after {timeout:g} seconds; display may be uncertain."
                     if timed_out
-                    else str(error)
+                    else f"{provider.title()} shortcut {name} timed out after {timeout:g} seconds."
                 )
                 log_timeout("shortcut_review", f"{provider}:{name}", timeout=timeout, details=detail)
                 steps.append({
@@ -342,12 +383,13 @@ def _run_provider(
                     "returncode": 124,
                     "stdout": "",
                     "stderr": detail,
-                    "timed_out": timed_out,
+                    "timed_out": True,
                 })
                 return {
                     "ok": False,
                     "provider": provider,
                     "failed_step": name,
+                    "status": "timeout",
                     "error": detail,
                     "steps": steps,
                     "browser_audit": browser_audit,
@@ -414,7 +456,14 @@ def run_shortcut_review(
             }
 
     explicit = provider is not None
-    order = [provider] if explicit else sorted(PROVIDERS, key=lambda name: (_last_shown(state, name), PROVIDERS.index(name)))
+    order = (
+        [provider]
+        if explicit
+        else sorted(
+            PROVIDERS,
+            key=lambda name: (_effective_last_activity(state, name), PROVIDERS.index(name)),
+        )
+    )
     attempts: list[dict[str, Any]] = []
     for candidate in order:
         result = _run_provider(
@@ -432,7 +481,9 @@ def run_shortcut_review(
             result["attempts"] = attempts
             return result
         if result.get("ok") and not result.get("skipped"):
-            state.setdefault("providers", {}).setdefault(candidate, {})["lastShownAt"] = timestamp.isoformat()
+            entry = state.setdefault("providers", {}).setdefault(candidate, {})
+            entry["lastShownAt"] = timestamp.isoformat()
+            entry.pop("lastFailureReason", None)
             history.append(timestamp)
             state["reviewHistory"] = [item.isoformat() for item in sorted(history)]
             _save_state(path, state)
@@ -441,6 +492,14 @@ def run_shortcut_review(
         if explicit:
             result["attempts"] = attempts
             return result
+        if result.get("steps"):
+            _record_failed(
+                path,
+                state,
+                candidate,
+                str(result.get("error") or result.get("failed_step") or "failed"),
+                timestamp,
+            )
 
     errors = [item.get("error") for item in attempts if not item.get("ok") and item.get("error")]
     if not errors and attempts:

@@ -467,6 +467,89 @@ class ShortcutReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "keyboard or apple"):
             maint.parse_shortcut_provider(["shortcuts", "--provider", "voice"])
 
+    def test_timed_out_apple_popup_falls_through_to_keyboard_and_records_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps({
+                "providers": {
+                    "apple": {"lastShownAt": "2026-10-15T00:00:00+00:00"},
+                    "keyboard": {"lastShownAt": "2026-10-29T00:00:00+00:00"},
+                }
+            }), encoding="utf-8")
+            calls = []
+
+            def runner(command, **kwargs):
+                calls.append((command, kwargs))
+                if command == ["apple-refresh"]:
+                    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"actionableCount": 5}), stderr="")
+                if command == ["apple-popup"]:
+                    raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 120))
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+            result = run_shortcut_review(
+                {
+                    "apple_shortcut_review_refresh_command": ["apple-refresh"],
+                    "apple_shortcut_review_popup_command": ["apple-popup"],
+                    "apple_shortcut_popup_timeout_seconds": 90,
+                    "return_flashcard_refresh_command": ["keyboard-refresh"],
+                    "return_shortcut_popup_command": ["keyboard-popup"],
+                    "shortcut_skip_idle_wait": True,
+                },
+                automatic=True,
+                runner=runner,
+                idle_provider=lambda: self.fail("shortcut_skip_idle_wait should skip wait_until_idle"),
+                state_path=state,
+                now=now,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["provider"], "keyboard")
+            self.assertEqual(
+                [cmd for cmd, _kwargs in calls],
+                [["apple-refresh"], ["apple-popup"], ["keyboard-refresh"], ["keyboard-popup"]],
+            )
+            self.assertEqual(calls[1][1]["timeout"], 90)
+            saved = json.loads(state.read_text(encoding="utf-8"))
+            self.assertEqual(datetime.fromisoformat(saved["providers"]["apple"]["lastFailedAt"]), now)
+            self.assertEqual(datetime.fromisoformat(saved["providers"]["keyboard"]["lastShownAt"]), now)
+
+    def test_recent_apple_failure_deprioritizes_apple_before_older_keyboard_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps({
+                "providers": {
+                    "apple": {
+                        "lastShownAt": "2026-10-15T00:00:00+00:00",
+                        "lastFailedAt": "2026-11-12T12:00:00+00:00",
+                    },
+                    "keyboard": {"lastShownAt": "2026-10-29T00:00:00+00:00"},
+                }
+            }), encoding="utf-8")
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            result = run_shortcut_review(
+                {
+                    "apple_shortcut_review_refresh_command": ["apple-refresh"],
+                    "apple_shortcut_review_popup_command": ["apple-popup"],
+                    "return_flashcard_refresh_command": ["keyboard-refresh"],
+                    "return_shortcut_popup_command": ["keyboard-popup"],
+                    "shortcut_skip_idle_wait": True,
+                },
+                automatic=True,
+                runner=runner,
+                state_path=state,
+                now=datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["provider"], "keyboard")
+            self.assertEqual(calls, [["keyboard-refresh"], ["keyboard-popup"]])
+
 
 if __name__ == "__main__":
     unittest.main()

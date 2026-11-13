@@ -137,6 +137,46 @@ class AppAuditorTests(unittest.TestCase):
 
         self.assertEqual(result[app][1], "2026-10-04")
 
+    def test_excludes_local_automation_helpers_and_launchagent_apps(self):
+        import plistlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            local_auto = root / "Applications" / "Local Automation"
+            helper = local_auto / "Codex Automation Helper.app"
+            helper.mkdir(parents=True)
+
+            launch_agents = root / "LaunchAgents"
+            launch_agents.mkdir()
+            agent_app = root / "Applications" / "Git Sync.app"
+            agent_app.mkdir(parents=True)
+            plist_path = launch_agents / "com.example.gitsync.plist"
+            with open(plist_path, "wb") as handle:
+                plistlib.dump(
+                    {"Label": "com.example.gitsync", "ProgramArguments": [str(agent_app / "Contents/MacOS/Runner")]},
+                    handle,
+                )
+
+            regular_old = root / "Applications" / "OldApp.app"
+            regular_old.mkdir(parents=True)
+            old_ts = 1_700_000_000.0
+            os.utime(regular_old, (old_ts, old_ts))
+
+            launchagent_apps = app_auditor.launchagent_referenced_app_paths([str(launch_agents)])
+            config = {"excluded_app_dirs": [str(local_auto)], "app_min_age_days": 14}
+
+            self.assertTrue(app_auditor.is_excluded_app(str(helper), config, launchagent_apps))
+            self.assertTrue(app_auditor.is_excluded_app(str(agent_app), config, launchagent_apps))
+            # Freshly created directory has age ~0 (< 14 days), so also excluded when now_ts is near creation;
+            # far in the future (> 14 days after creation), regular_old is NOT excluded.
+            self.assertFalse(
+                app_auditor.is_excluded_app(
+                    str(regular_old),
+                    config,
+                    launchagent_apps,
+                    now_ts=os.stat(regular_old).st_mtime + 30 * 86400,
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
