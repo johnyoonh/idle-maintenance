@@ -513,11 +513,21 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func finish(_ result: String) {
-        guard !didFinish else { return }
+        guard !didFinish else {
+            window.orderOut(nil)
+            statusItem = nil
+            NSApp.terminate(nil)
+            return
+        }
         if result == "QUIT" {
             didFinish = true
+            window.orderOut(nil)
+            statusItem = nil
             emit(result)
             NSApp.terminate(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                Foundation.exit(0)
+            }
             return
         }
         guard reviewState == .reviewing else { return }
@@ -527,13 +537,19 @@ final class MaintenanceApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         didFinish = true
+        window.orderOut(nil)
+        statusItem = nil
         emit(result)
         NSApp.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            Foundation.exit(0)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
         finish("QUIT")
-        return false
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
