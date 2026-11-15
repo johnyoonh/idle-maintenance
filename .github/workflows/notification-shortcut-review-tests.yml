@@ -1,0 +1,20 @@
+name: Notification shortcut review policy
+on:
+  pull_request:
+    paths:
+      - "shortcut_review.py"
+      - "tests/test_shortcut_review.py"
+      - ".github/workflows/notification-shortcut-review-tests.yml"
+  workflow_dispatch:
+jobs:
+  shortcut-review-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile changed Python
+        run: python -m py_compile shortcut_review.py tests/test_shortcut_review.py
+      - name: Shortcuts review regressions
+        run: python -m unittest discover -s tests -p test_shortcut_review.py -v

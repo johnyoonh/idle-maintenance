@@ -414,6 +414,23 @@ def _run_provider(
     return {"ok": True, "provider": provider, "skipped": False, "failed_step": None, "error": "", "steps": steps, "browser_audit": browser_audit}
 
 
+def automatic_review_allowed(home: Path) -> bool:
+    """Honor the optional shared dashboard without changing manual reviews."""
+    raw_path = os.getenv("WIKI_NOTIFICATION_RULES_PATH")
+    path = Path(raw_path).expanduser() if raw_path else (
+        home / "Library/Application Support/wiki-automation/notification-rules.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True  # No dashboard save: preserve existing behavior.
+    if not isinstance(payload, dict):
+        return True
+    rules = payload.get("sources")
+    mode = rules.get("idle-maintenance.shortcut-review") if isinstance(rules, dict) else None
+    return mode not in {"silent", "digest"}
+
+
 def run_shortcut_review(
     config: dict[str, Any] | None = None,
     *,
@@ -439,6 +456,12 @@ def run_shortcut_review(
     assert timestamp is not None
     path = Path(state_path or config.get("shortcut_review_state_path") or _default_state_path(root))
     state = _load_state(path)
+    if automatic and not automatic_review_allowed(root):
+        return {
+            "ok": True, "provider": None, "skipped": True,
+            "reason": "shared-notification-policy", "failed_step": None,
+            "error": "", "steps": [],
+        }
     history, state_changed = _review_history(state, timestamp)
     if automatic:
         gate = _automatic_gate(config, history, timestamp)
@@ -513,6 +536,11 @@ def render_result(result: dict[str, Any]) -> str:
             return "Shortcut review daily limit reached."
         if result.get("reason") == "cooldown":
             return f"Shortcut review is cooling down until {result.get('nextEligibleAt')}."
+        if result.get("reason") == "shared-notification-policy":
+            return (
+                f"Shortcut review skipped by shared notification rule "
+                f"({result.get('notificationRuleId')}: {result.get('notificationMode')})."
+            )
         return "No Apple Shortcut candidates were due for review."
     if result.get("ok"):
         audit = result.get("browser_audit") or {}
