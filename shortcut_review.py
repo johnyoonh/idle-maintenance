@@ -536,6 +536,11 @@ def render_result(result: dict[str, Any]) -> str:
             return "Shortcut review daily limit reached."
         if result.get("reason") == "cooldown":
             return f"Shortcut review is cooling down until {result.get('nextEligibleAt')}."
+        if result.get("reason") == "shared-notification-policy":
+            return (
+                f"Shortcut review skipped by shared notification rule "
+                f"({result.get('notificationRuleId')}: {result.get('notificationMode')})."
+            )
         return "No Apple Shortcut candidates were due for review."
     if result.get("ok"):
         audit = result.get("browser_audit") or {}

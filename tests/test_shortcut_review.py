@@ -38,6 +38,7 @@ class ShortcutReviewTests(unittest.TestCase):
                 )
                 self.assertTrue(skipped["skipped"])
                 self.assertEqual(skipped["reason"], "shared-notification-policy")
+                self.assertIn("shared notification rule", render_result(skipped))
                 self.assertEqual(calls, [])
                 manual = run_shortcut_review(
                     settings, provider="keyboard", automatic=False,
