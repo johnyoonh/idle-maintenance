@@ -14,6 +14,38 @@ from shortcut_review import normalize_command, render_result, run_shortcut_revie
 
 
 class ShortcutReviewTests(unittest.TestCase):
+    def test_shared_dashboard_silences_only_automatic_shortcut_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_file = root / "rules.json"
+            policy_file.write_text(json.dumps({
+                "sources": {"idle-maintenance.shortcut-review": "silent"},
+            }), encoding="utf-8")
+            calls = []
+
+            def runner(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, "ok", "")
+
+            settings = {
+                "return_flashcard_refresh_command": ["kb", "export-srs"],
+                "return_shortcut_popup_command": ["kb", "popup"],
+            }
+            with patch.dict("os.environ", {"WIKI_NOTIFICATION_RULES_PATH": str(policy_file)}):
+                skipped = run_shortcut_review(
+                    settings, automatic=True, home=root,
+                    state_path=root / "state.json", runner=runner,
+                )
+                self.assertTrue(skipped["skipped"])
+                self.assertEqual(skipped["reason"], "shared-notification-policy")
+                self.assertEqual(calls, [])
+                manual = run_shortcut_review(
+                    settings, provider="keyboard", automatic=False,
+                    home=root, state_path=root / "state.json", runner=runner,
+                )
+                self.assertTrue(manual["ok"])
+                self.assertEqual(calls, [["kb", "export-srs"], ["kb", "popup"]])
+
     def test_normalize_command_expands_home_without_shell(self):
         command = normalize_command("~/bin/kb popup --force", Path("/tmp/home"))
         self.assertEqual(command, ["/tmp/home/bin/kb", "popup", "--force"])
